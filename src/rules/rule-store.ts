@@ -1,41 +1,75 @@
 /**
- * Rule Store — minimal in-memory store for RuleItems.
+ * Rule Store — local-file-backed store for RuleItems.
  *
  * Rules answer "what must not be done", "what takes priority",
  * and "how to resolve conflicts".
- * They do NOT store facts (that's knowledge) or step templates (that's skills).
- *
- * Placeholder status: in-memory array; no priority-based conflict resolution.
- * Phase 2 (Codex) will add priority sorting, scope-aware filtering,
- * and rule evaluation during permission checks.
  */
 
+import path from 'node:path';
 import type { RuleItem } from '../shared/contracts.js';
+import { ensureDataLayerDir, resolveDataRoot } from '../shared/data-paths.js';
+import { loadRuleItems } from './rule-loader.js';
+import { writeRuleItem } from './rule-writer.js';
+
+export interface RuleStoreOptions {
+  dataRoot?: string;
+  autoLoad?: boolean;
+}
 
 export class RuleStore {
-  private items: RuleItem[] = [];
+  private items = new Map<string, RuleItem>();
+  private readonly dataRoot: string;
+  private readonly storageDir: string;
 
-  add(item: RuleItem): void {
-    this.items.push(item);
+  constructor(options: RuleStoreOptions = {}) {
+    this.dataRoot = resolveDataRoot(options.dataRoot);
+    this.storageDir = ensureDataLayerDir('rules', this.dataRoot);
+
+    if (options.autoLoad !== false) {
+      this.reloadFromDisk();
+    }
+  }
+
+  add(item: RuleItem): string {
+    this.items.set(item.id, item);
+    return writeRuleItem(this.storageDir, item);
   }
 
   get(id: string): RuleItem | undefined {
-    return this.items.find((i) => i.id === id);
+    return this.items.get(id);
   }
 
   listIds(): string[] {
-    return this.items.map((i) => i.id);
+    return Array.from(this.items.keys());
   }
 
   listAll(): RuleItem[] {
-    return [...this.items];
+    return Array.from(this.items.values());
   }
 
   getByScope(scope: RuleItem['scope']): RuleItem[] {
-    return this.items.filter((i) => i.scope === scope);
+    return this.listAll().filter((item) => item.scope === scope);
   }
 
   count(): number {
-    return this.items.length;
+    return this.items.size;
+  }
+
+  reloadFromDisk(): number {
+    const loaded = loadRuleItems(this.storageDir).sort((a, b) => b.priority - a.priority);
+    this.items = new Map(loaded.map((item) => [item.id, item]));
+    return this.items.size;
+  }
+
+  getStorageDir(): string {
+    return this.storageDir;
+  }
+
+  getDataRoot(): string {
+    return this.dataRoot;
+  }
+
+  resolveItemPath(id: string): string {
+    return path.join(this.storageDir, `${id}.json`);
   }
 }

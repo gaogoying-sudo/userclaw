@@ -32,6 +32,7 @@ import { KnowledgeStore } from '../knowledge/knowledge-store.js';
 import { SkillStore } from '../skills/skill-store.js';
 import { RuleStore } from '../rules/rule-store.js';
 import { MetricsCollector } from '../observability/metrics.js';
+import type { PermissionDecisionEvent } from '../permissions/permission-types.js';
 
 export interface QueryRuntimeDeps {
   toolRegistry: ToolRegistry;
@@ -45,6 +46,7 @@ export interface QueryRunResult {
   session: QuerySession;
   toolResults: ToolResult[];
   metrics: SessionMetrics;
+  permissionDecisions: PermissionDecisionEvent[];
   error?: ExecutionError;
 }
 
@@ -59,6 +61,7 @@ export class QueryRuntime {
     const sm = new QueryStateMachine();
     const metrics = new MetricsCollector(request.sessionId);
     const startTime = Date.now();
+    const permissionLogStart = this.deps.permissionEngine.listDecisionLog().length;
 
     const session: QuerySession = {
       id: generateId(),
@@ -89,7 +92,12 @@ export class QueryRuntime {
         session.endedAt = new Date().toISOString();
         metrics.recordEnd(Date.now() - startTime);
         toolResults.push(injectionResult);
-        return { session, toolResults, metrics: metrics.snapshot() };
+        return {
+          session,
+          toolResults,
+          metrics: metrics.snapshot(),
+          permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+        };
       }
 
       // Mock model call: in Phase 2 this becomes a real LLM request that
@@ -126,19 +134,67 @@ export class QueryRuntime {
             session.failureReason = `Permission denied for tool ${tc.toolName}`;
             session.endedAt = new Date().toISOString();
             metrics.recordEnd(Date.now() - startTime);
-            return { session, toolResults, metrics: metrics.snapshot(), error: {
-              code: 'PERMISSION_DENIED',
-              message: session.failureReason,
-              category: 'permission_denied',
-              retryable: false,
-            }};
+            return {
+              session,
+              toolResults,
+              metrics: metrics.snapshot(),
+              permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+              error: {
+                code: 'PERMISSION_DENIED',
+                message: session.failureReason,
+                category: 'permission_denied',
+                retryable: false,
+              },
+            };
           }
           if (decision.decision === 'ask') {
-            // In V1 skeleton, 'ask' is auto-approved for demo purposes.
-            // Phase 2 will wire this to an interactive UI confirmation flow.
             sm.transition('waiting_permission');
             session.state = sm.state;
-            // simulate approval
+
+            const finalDecision = await this.deps.permissionEngine.requestPermission({
+              sessionId: session.id,
+              submitRequestId: request.id,
+              tool: {
+                name: spec.name,
+                description: spec.description,
+                isReadOnly: spec.isReadOnly,
+                isDestructive: spec.isDestructive,
+                requiresPermission: spec.requiresPermission,
+              },
+              input: tc.input,
+              runtimeContext: runtimeCtx,
+              initialDecision: decision,
+              targetPath: this.deps.permissionEngine.getTargetPath(tc.input),
+            });
+
+            if (finalDecision.decision !== 'allow') {
+              sm.transition('failed');
+              session.state = sm.state;
+              session.failureReason = `Permission ${finalDecision.decision} for tool ${tc.toolName}`;
+              session.endedAt = new Date().toISOString();
+              metrics.recordEnd(Date.now() - startTime);
+              return {
+                session,
+                toolResults: [
+                  ...toolResults,
+                  {
+                    ok: false,
+                    previewText: `Permission ${finalDecision.decision}: ${finalDecision.reason ?? 'no reason'}`,
+                    errorCode: 'PERMISSION_DENIED',
+                    errorMessage: finalDecision.reason,
+                  },
+                ],
+                metrics: metrics.snapshot(),
+                permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+                error: {
+                  code: 'PERMISSION_DENIED',
+                  message: session.failureReason,
+                  category: 'permission_denied',
+                  retryable: false,
+                },
+              };
+            }
+
             sm.transition('running');
             session.state = sm.state;
           }
@@ -157,7 +213,12 @@ export class QueryRuntime {
       session.endedAt = new Date().toISOString();
       metrics.recordEnd(Date.now() - startTime);
 
-      return { session, toolResults, metrics: metrics.snapshot() };
+      return {
+        session,
+        toolResults,
+        metrics: metrics.snapshot(),
+        permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!sm.isTerminal()) {
@@ -172,6 +233,7 @@ export class QueryRuntime {
         session,
         toolResults,
         metrics: metrics.snapshot(),
+        permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
         error: {
           code: 'RUNTIME_ERROR',
           message,
@@ -180,6 +242,10 @@ export class QueryRuntime {
         },
       };
     }
+  }
+
+  private getPermissionDecisionsSince(startIndex: number): PermissionDecisionEvent[] {
+    return this.deps.permissionEngine.listDecisionLog().slice(startIndex);
   }
 
   private resolveTaskType(request: SubmitRequest): QuerySession['taskType'] {
@@ -236,6 +302,9 @@ export class QueryRuntime {
     const text = request.inputText ?? '';
 
     const deposited: string[] = [];
+    const existingKnowledge = this.deps.knowledgeStore.listAll();
+    const existingSkills = this.deps.skillStore.listAll();
+    const existingRules = this.deps.ruleStore.listAll();
 
     // Deposit knowledge items from payload or derive from text
     const knowledgeEntries = (payload.knowledge as Array<{ title: string; content: string; tags?: string[] }>) ?? [];
@@ -243,6 +312,12 @@ export class QueryRuntime {
       knowledgeEntries.push({ title: 'Injected knowledge', content: text, tags: ['auto-injected'] });
     }
     for (const k of knowledgeEntries) {
+      const duplicate = existingKnowledge.some(
+        (item) => item.title === k.title && item.content === k.content,
+      );
+      if (duplicate) {
+        continue;
+      }
       this.deps.knowledgeStore.add({
         id: generateId(),
         title: k.title,
@@ -256,6 +331,10 @@ export class QueryRuntime {
     // Deposit skill items from payload
     const skillEntries = (payload.skills as Array<{ name: string; description: string; steps: string[] }>) ?? [];
     for (const s of skillEntries) {
+      const duplicate = existingSkills.some((item) => item.name === s.name);
+      if (duplicate) {
+        continue;
+      }
       this.deps.skillStore.add({
         id: generateId(),
         name: s.name,
@@ -268,6 +347,12 @@ export class QueryRuntime {
     // Deposit rule items from payload
     const ruleEntries = (payload.rules as Array<{ name: string; ruleText: string; priority: number }>) ?? [];
     for (const r of ruleEntries) {
+      const duplicate = existingRules.some(
+        (item) => item.name === r.name && item.ruleText === r.ruleText,
+      );
+      if (duplicate) {
+        continue;
+      }
       this.deps.ruleStore.add({
         id: generateId(),
         name: r.name,
@@ -317,11 +402,22 @@ export class QueryRuntime {
    * Ensures Tool Contract validation actually exercises real checks.
    */
   private buildMockToolInput(toolName: string, taskText: string): unknown {
+    const lowerTask = taskText.toLowerCase();
+
     switch (toolName) {
-      case 'mock_search':
-        return { query: taskText };
-      case 'mock_file_write':
-        return { path: 'docs/output.md', content: `Generated from task: ${taskText}` };
+      case 'file_read':
+        return { path: 'docs/planning/userclaw-v1-project-charter.md', maxBytes: 5000 };
+      case 'file_write':
+        return {
+          path: lowerTask.includes('docs')
+            ? 'docs/runtime-generated.md'
+            : 'userclaw-data/generated/runtime-notes.md',
+          content: `Generated from task: ${taskText}\n`,
+        };
+      case 'directory_list':
+        return { path: 'src', maxEntries: 20 };
+      case 'local_search':
+        return { query: taskText, path: 'src', maxResults: 8 };
       default:
         return { query: taskText };
     }

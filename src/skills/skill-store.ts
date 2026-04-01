@@ -1,37 +1,71 @@
 /**
- * Skill Store — minimal in-memory store for SkillItems.
+ * Skill Store — local-file-backed store for SkillItems.
  *
  * Skills answer "how to do this kind of task" — step templates,
  * operation patterns, execution workflows.
- * They do NOT store facts (that's knowledge) or constraints (that's rules).
- *
- * Placeholder status: in-memory array; no frontmatter parsing or hot-reload.
- * Phase 2 (Codex) will add markdown-based skill loading with frontmatter,
- * hot-reload on file change, and skill matching by task type.
  */
 
+import path from 'node:path';
 import type { SkillItem } from '../shared/contracts.js';
+import { ensureDataLayerDir, resolveDataRoot } from '../shared/data-paths.js';
+import { loadSkillItems } from './skill-loader.js';
+import { writeSkillItem } from './skill-writer.js';
+
+export interface SkillStoreOptions {
+  dataRoot?: string;
+  autoLoad?: boolean;
+}
 
 export class SkillStore {
-  private items: SkillItem[] = [];
+  private items = new Map<string, SkillItem>();
+  private readonly dataRoot: string;
+  private readonly storageDir: string;
 
-  add(item: SkillItem): void {
-    this.items.push(item);
+  constructor(options: SkillStoreOptions = {}) {
+    this.dataRoot = resolveDataRoot(options.dataRoot);
+    this.storageDir = ensureDataLayerDir('skills', this.dataRoot);
+
+    if (options.autoLoad !== false) {
+      this.reloadFromDisk();
+    }
+  }
+
+  add(item: SkillItem): string {
+    this.items.set(item.id, item);
+    return writeSkillItem(this.storageDir, item);
   }
 
   get(id: string): SkillItem | undefined {
-    return this.items.find((i) => i.id === id);
+    return this.items.get(id);
   }
 
   listIds(): string[] {
-    return this.items.map((i) => i.id);
+    return Array.from(this.items.keys());
   }
 
   listAll(): SkillItem[] {
-    return [...this.items];
+    return Array.from(this.items.values());
   }
 
   count(): number {
-    return this.items.length;
+    return this.items.size;
+  }
+
+  reloadFromDisk(): number {
+    const loaded = loadSkillItems(this.storageDir);
+    this.items = new Map(loaded.map((item) => [item.id, item]));
+    return this.items.size;
+  }
+
+  getStorageDir(): string {
+    return this.storageDir;
+  }
+
+  getDataRoot(): string {
+    return this.dataRoot;
+  }
+
+  resolveItemPath(id: string): string {
+    return path.join(this.storageDir, `${id}.md`);
   }
 }

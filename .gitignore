@@ -1,3 +1,17 @@
 node_modules/
 dist/
 *.tsbuildinfo
+userclaw-data/*
+!userclaw-data/.gitkeep
+!userclaw-data/knowledge/
+userclaw-data/knowledge/*
+!userclaw-data/knowledge/.gitkeep
+!userclaw-data/skills/
+userclaw-data/skills/*
+!userclaw-data/skills/.gitkeep
+!userclaw-data/rules/
+userclaw-data/rules/*
+!userclaw-data/rules/.gitkeep
+!userclaw-data/permissions/
+userclaw-data/permissions/*
+!userclaw-data/permissions/.gitkeep

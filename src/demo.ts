@@ -1,14 +1,14 @@
 /**
- * userclaw V1 Skeleton Demo
+ * userclaw V1 Phase 2 Demo
  *
- * This script validates the runtime skeleton by running a complete
+ * This script validates Phase 2 minimal real capability by running a complete
  * "inject → execute → return result" chain through all unified layers:
  *
- *  1. Seed mock knowledge / skill / rule items (guided injection simulation)
- *  2. Register mock tools in Tool Registry
+ *  1. Load knowledge / skill / rule from local storage
+ *  2. Register real core tools in Tool Registry
  *  3. Configure Permission Engine
  *  4. Submit a natural-language task through unified Submit Entry
- *  5. Query Runtime drives state machine: idle → dispatching → running → completed
+ *  5. Query Runtime drives state machine: idle → dispatching → running → completed/failed
  *  6. Tool calls go through Tool Contract and Permission checks
  *  7. Doctor runs a health check
  *  8. Metrics are collected
@@ -17,14 +17,16 @@
  */
 
 import { ToolRegistry } from './tools/tool-registry.js';
-import { registerMockTools } from './tools/mock-tools.js';
+import { registerCoreTools } from './tools/index.js';
 import { PermissionEngine } from './permissions/permission-engine.js';
+import { createAutoApprovePermissionCallback } from './permissions/permission-callback.js';
 import { KnowledgeStore } from './knowledge/knowledge-store.js';
 import { SkillStore } from './skills/skill-store.js';
 import { RuleStore } from './rules/rule-store.js';
 import { QueryRuntime } from './runtime/query-runtime.js';
 import { SubmitEntry } from './submit/submit-entry.js';
 import { Doctor } from './observability/doctor.js';
+import { resolveDataRoot } from './shared/data-paths.js';
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -42,37 +44,53 @@ function printJson(label: string, obj: unknown): void {
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  separator('userclaw V1 Runtime Skeleton Demo');
+  separator('userclaw V1 Phase 2 Core Demo');
 
-  // ── Setup: Tool & Permission ───────────────────────────────────────────
-  const knowledgeStore = new KnowledgeStore();
-  const skillStore = new SkillStore();
-  const ruleStore = new RuleStore();
+  const dataRoot = resolveDataRoot();
+
+  // ── Setup: Local persistence-backed stores ─────────────────────────────
+  const knowledgeStore = new KnowledgeStore({ dataRoot });
+  const skillStore = new SkillStore({ dataRoot });
+  const ruleStore = new RuleStore({ dataRoot });
   const toolRegistry = new ToolRegistry();
-  registerMockTools(toolRegistry);
+  registerCoreTools(toolRegistry);
 
-  const permissionEngine = new PermissionEngine();
+  const permissionEngine = new PermissionEngine({
+    dataRoot,
+    requestPermission: createAutoApprovePermissionCallback('session'),
+  });
   permissionEngine.addRule({
-    toolName: 'mock_file_write',
-    verdict: 'ask',
-    reason: 'File write requires confirmation',
+    toolName: 'file_write',
+    verdict: 'deny',
+    reason: 'Writes under docs/ are blocked in demo policy',
+    scope: 'project',
+    pathPrefix: 'docs/',
   });
 
-  const runtime = new QueryRuntime({
+  const injectionRuntime = new QueryRuntime({
     toolRegistry,
     permissionEngine,
     knowledgeStore,
     skillStore,
     ruleStore,
   });
-  const entry = new SubmitEntry(runtime);
+  const injectionEntry = new SubmitEntry(injectionRuntime);
+
+  separator('Phase 0: Startup Load');
+  console.log(`\n  Data root: ${dataRoot}`);
+  console.log('  Loaded from disk:');
+  console.log(`    Knowledge items: ${knowledgeStore.count()}`);
+  console.log(`    Skills:          ${skillStore.count()}`);
+  console.log(`    Rules:           ${ruleStore.count()}`);
+  console.log(`    Tools:           ${toolRegistry.count()}`);
+  console.log(`    Permission rules:${permissionEngine.listRules().length}`);
 
   // ── Phase A: Guided Injection through unified Submit Entry ────────────
   separator('Phase A: Guided Injection via Unified Submit Entry');
 
   console.log('\n  Submitting injection payload through SubmitEntry...');
 
-  const injectionResult = await entry.submit(
+  const injectionResult = await injectionEntry.submit(
     'Onboard project context for userclaw development',
     {
       source: 'guided_injection',
@@ -127,58 +145,103 @@ async function main(): Promise<void> {
   console.log(`    Skills:          ${skillStore.count()}`);
   console.log(`    Rules:           ${ruleStore.count()}`);
 
-  // ── Phase B: Doctor Health Check ──────────────────────────────────────
-  separator('Phase B: Doctor Health Check');
+  // ── Phase B: Simulated restart + reload from disk ─────────────────────
+  separator('Phase B: Simulated Restart (Reload from Local Files)');
+
+  const reloadedKnowledgeStore = new KnowledgeStore({ dataRoot });
+  const reloadedSkillStore = new SkillStore({ dataRoot });
+  const reloadedRuleStore = new RuleStore({ dataRoot });
+
+  console.log('\n  Reloaded stores from disk:');
+  console.log(`    Knowledge items: ${reloadedKnowledgeStore.count()}`);
+  console.log(`    Skills:          ${reloadedSkillStore.count()}`);
+  console.log(`    Rules:           ${reloadedRuleStore.count()}`);
+
+  const runtime = new QueryRuntime({
+    toolRegistry,
+    permissionEngine,
+    knowledgeStore: reloadedKnowledgeStore,
+    skillStore: reloadedSkillStore,
+    ruleStore: reloadedRuleStore,
+  });
+  const entry = new SubmitEntry(runtime);
+
+  // ── Phase C: Doctor Health Check ──────────────────────────────────────
+  separator('Phase C: Doctor Health Check');
 
   const doctor = new Doctor({
     toolRegistry,
     permissionEngine,
-    knowledgeStore,
-    skillStore,
-    ruleStore,
+    knowledgeStore: reloadedKnowledgeStore,
+    skillStore: reloadedSkillStore,
+    ruleStore: reloadedRuleStore,
   });
   const report = doctor.run();
   printJson('Doctor Report', report);
 
-  // ── Phase C: Natural Language Task Execution ──────────────────────────
-  separator('Phase C: Natural Language Task Execution');
+  // ── Phase D: Natural Language Task Execution (allow/ask path) ─────────
+  separator('Phase D: Execution Run 1 (ask → allow)');
 
-  console.log('\n  Submitting task: "Find information about our API conventions and update the docs"');
+  console.log('\n  Submitting task: "Find API conventions and draft runtime notes"');
 
-  const result = await entry.submit(
-    'Find information about our API conventions and update the docs',
+  const run1 = await entry.submit(
+    'Find API conventions and draft runtime notes',
   );
 
-  printJson('Query Session', result.session);
-  printJson('Tool Results', result.toolResults);
-  printJson('Session Metrics', result.metrics);
+  printJson('Run 1 Session', run1.session);
+  printJson('Run 1 Tool Results', run1.toolResults);
+  printJson('Run 1 Permission Decisions', run1.permissionDecisions);
+  printJson('Run 1 Metrics', run1.metrics);
 
-  if (result.error) {
-    printJson('Execution Error', result.error);
+  if (run1.error) {
+    printJson('Run 1 Error', run1.error);
   }
 
-  // ── Phase D: State Flow Summary ───────────────────────────────────────
-  separator('Phase D: State Flow Summary');
+  // ── Phase E: Natural Language Task Execution (deny path) ──────────────
+  separator('Phase E: Execution Run 2 (deny by path rule)');
+
+  console.log('\n  Submitting task: "Find API conventions and update docs"');
+
+  const run2 = await entry.submit(
+    'Find API conventions and update docs',
+  );
+
+  printJson('Run 2 Session', run2.session);
+  printJson('Run 2 Tool Results', run2.toolResults);
+  printJson('Run 2 Permission Decisions', run2.permissionDecisions);
+  printJson('Run 2 Metrics', run2.metrics);
+
+  if (run2.error) {
+    printJson('Run 2 Error', run2.error);
+  }
+
+  // ── Phase F: State Flow Summary ───────────────────────────────────────
+  separator('Phase F: State Flow Summary');
 
   console.log(`
   Injection chain (Phase A):
     idle → dispatching → running → ${injectionResult.session.state}
     taskType: ${injectionResult.session.taskType}
 
-  Execution chain (Phase C):
-    idle → dispatching → running → waiting_permission → running → ${result.session.state}
-    taskType: ${result.session.taskType}
+  Execution chain 1 (Phase D):
+    idle → dispatching → running → waiting_permission → running → ${run1.session.state}
+    taskType: ${run1.session.taskType}
+
+  Execution chain 2 (Phase E):
+    idle → dispatching → running → waiting_permission → ${run2.session.state}
+    taskType: ${run2.session.taskType}
 
   Layers exercised:
     [✓] Unified Submit Entry (both injection and execution)
     [✓] Query Runtime with explicit state machine
-    [✓] Guided injection → knowledge/skill/rule deposit via runtime
-    [✓] Tool Registry & Tool Contract (with per-tool input validation)
+    [✓] Guided injection → knowledge/skill/rule deposit + local persistence
+    [✓] Startup reload from local files (knowledge / skills / rules)
+    [✓] Tool Registry & Tool Contract with real tools and input validation
     [✓] Tool Executor
-    [✓] Permission Engine (ask → auto-approved for demo)
-    [✓] Knowledge Store (${knowledgeStore.count()} items)
-    [✓] Skill Store (${skillStore.count()} items)
-    [✓] Rule Store (${ruleStore.count()} items)
+    [✓] Permission Engine (ask / allow / deny + scope + path rule + callback)
+    [✓] Knowledge Store (${reloadedKnowledgeStore.count()} items)
+    [✓] Skill Store (${reloadedSkillStore.count()} items)
+    [✓] Rule Store (${reloadedRuleStore.count()} items)
     [✓] Doctor health check
     [✓] Metrics collection
   `);
