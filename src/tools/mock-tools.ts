@@ -8,7 +8,7 @@
  * when real tool implementations (file read, search, bash, etc.) land.
  */
 
-import type { ToolSpec, ToolResult, RuntimeContext } from '../shared/contracts.js';
+import type { ToolSpec, ToolResult, ValidationResult, RuntimeContext } from '../shared/contracts.js';
 
 export const mockSearchTool: ToolSpec = {
   name: 'mock_search',
@@ -57,12 +57,27 @@ export const mockFileWriteTool: ToolSpec = {
   isConcurrencySafe: false,
   requiresPermission: true,
 
+  async validateInput(input: unknown): Promise<ValidationResult> {
+    const obj = input as Record<string, unknown> | null | undefined;
+    const errors: string[] = [];
+    if (!obj || typeof obj !== 'object') {
+      return { valid: false, errors: ['Input must be an object'] };
+    }
+    if (typeof obj.path !== 'string' || obj.path.length === 0) {
+      errors.push('Missing or empty required field: path');
+    }
+    if (typeof obj.content !== 'string') {
+      errors.push('Missing required field: content');
+    }
+    return errors.length > 0 ? { valid: false, errors } : { valid: true };
+  },
+
   async execute(input: unknown, _ctx: RuntimeContext): Promise<ToolResult> {
-    const { path } = input as { path: string; content: string };
+    const { path, content } = input as { path: string; content: string };
     return {
       ok: true,
-      previewText: `[mock_file_write] Wrote to ${path ?? 'unknown path'}`,
-      data: { path, bytesWritten: 256 },
+      previewText: `[mock_file_write] Wrote to ${path}`,
+      data: { path, bytesWritten: content.length },
     };
   },
 };

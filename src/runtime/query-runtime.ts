@@ -81,6 +81,17 @@ export class QueryRuntime {
       sm.transition('running');
       session.state = sm.state;
 
+      // Branch by task type: injection deposits into stores; execution runs tools.
+      if (session.taskType === 'injection') {
+        const injectionResult = this.handleInjection(request);
+        sm.transition('completed');
+        session.state = sm.state;
+        session.endedAt = new Date().toISOString();
+        metrics.recordEnd(Date.now() - startTime);
+        toolResults.push(injectionResult);
+        return { session, toolResults, metrics: metrics.snapshot() };
+      }
+
       // Mock model call: in Phase 2 this becomes a real LLM request that
       // may return tool_use blocks in a streaming loop.
       const modelDecision = await this.mockModelCall(request, runtimeCtx);
@@ -214,9 +225,70 @@ export class QueryRuntime {
   }
 
   /**
+   * Handle guided injection: parse input and deposit into knowledge/skill/rule stores.
+   *
+   * Placeholder: uses mock parsing that extracts from structuredPayload or
+   * derives mock items from inputText. Phase 2 (Codex) will replace with
+   * real extraction (LLM-assisted or structured form parsing).
+   */
+  private handleInjection(request: SubmitRequest): ToolResult {
+    const payload = request.structuredPayload ?? {};
+    const text = request.inputText ?? '';
+
+    const deposited: string[] = [];
+
+    // Deposit knowledge items from payload or derive from text
+    const knowledgeEntries = (payload.knowledge as Array<{ title: string; content: string; tags?: string[] }>) ?? [];
+    if (knowledgeEntries.length === 0 && text) {
+      knowledgeEntries.push({ title: 'Injected knowledge', content: text, tags: ['auto-injected'] });
+    }
+    for (const k of knowledgeEntries) {
+      this.deps.knowledgeStore.add({
+        id: generateId(),
+        title: k.title,
+        content: k.content,
+        tags: k.tags,
+        source: 'guided_injection',
+      });
+      deposited.push(`knowledge: "${k.title}"`);
+    }
+
+    // Deposit skill items from payload
+    const skillEntries = (payload.skills as Array<{ name: string; description: string; steps: string[] }>) ?? [];
+    for (const s of skillEntries) {
+      this.deps.skillStore.add({
+        id: generateId(),
+        name: s.name,
+        description: s.description,
+        steps: s.steps,
+      });
+      deposited.push(`skill: "${s.name}"`);
+    }
+
+    // Deposit rule items from payload
+    const ruleEntries = (payload.rules as Array<{ name: string; ruleText: string; priority: number }>) ?? [];
+    for (const r of ruleEntries) {
+      this.deps.ruleStore.add({
+        id: generateId(),
+        name: r.name,
+        ruleText: r.ruleText,
+        priority: r.priority,
+        scope: 'project',
+      });
+      deposited.push(`rule: "${r.name}"`);
+    }
+
+    return {
+      ok: true,
+      previewText: `[injection] Deposited ${deposited.length} item(s): ${deposited.join(', ')}`,
+      data: { deposited },
+    };
+  }
+
+  /**
    * Mock model call.
    *
-   * Placeholder: returns a hardcoded tool call plan.
+   * Placeholder: returns a hardcoded tool call plan with per-tool valid inputs.
    * Phase 2 (Codex) replaces with real LLM streaming call that
    * parses tool_use blocks from the model response.
    */
@@ -225,17 +297,33 @@ export class QueryRuntime {
     _ctx: RuntimeContext,
   ): Promise<{ response: string; toolCalls: ToolCall[] }> {
     const availableTools = this.deps.toolRegistry.listNames();
+    const taskText = request.inputText ?? '';
 
     const toolCalls: ToolCall[] = availableTools.map((name) => ({
       id: generateId(),
       toolName: name,
-      input: { query: request.inputText ?? '' },
+      input: this.buildMockToolInput(name, taskText),
       invokedAt: new Date().toISOString(),
     }));
 
     return {
-      response: `[mock-model] Analyzed task "${request.inputText}". Invoking ${toolCalls.length} tool(s).`,
+      response: `[mock-model] Analyzed task "${taskText}". Invoking ${toolCalls.length} tool(s).`,
       toolCalls,
     };
+  }
+
+  /**
+   * Generate schema-compliant mock input per tool name.
+   * Ensures Tool Contract validation actually exercises real checks.
+   */
+  private buildMockToolInput(toolName: string, taskText: string): unknown {
+    switch (toolName) {
+      case 'mock_search':
+        return { query: taskText };
+      case 'mock_file_write':
+        return { path: 'docs/output.md', content: `Generated from task: ${taskText}` };
+      default:
+        return { query: taskText };
+    }
   }
 }

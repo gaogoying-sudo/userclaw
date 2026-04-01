@@ -25,7 +25,6 @@ import { RuleStore } from './rules/rule-store.js';
 import { QueryRuntime } from './runtime/query-runtime.js';
 import { SubmitEntry } from './submit/submit-entry.js';
 import { Doctor } from './observability/doctor.js';
-import { generateId } from './shared/id.js';
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -45,64 +44,10 @@ function printJson(label: string, obj: unknown): void {
 async function main(): Promise<void> {
   separator('userclaw V1 Runtime Skeleton Demo');
 
-  // ── Phase A: Guided Injection Simulation ──────────────────────────────
-  separator('Phase A: Guided Injection — Seeding Knowledge / Skill / Rule');
-
+  // ── Setup: Tool & Permission ───────────────────────────────────────────
   const knowledgeStore = new KnowledgeStore();
   const skillStore = new SkillStore();
   const ruleStore = new RuleStore();
-
-  knowledgeStore.add({
-    id: generateId(),
-    title: 'Project Tech Stack',
-    content: 'The project uses TypeScript, Node.js, and follows a layered runtime architecture.',
-    tags: ['tech', 'stack'],
-    source: 'guided_injection',
-  });
-  knowledgeStore.add({
-    id: generateId(),
-    title: 'API Conventions',
-    content: 'All API responses use { ok, data, error } envelope. Errors include category and retryable flag.',
-    tags: ['api', 'conventions'],
-    source: 'guided_injection',
-  });
-
-  skillStore.add({
-    id: generateId(),
-    name: 'bugfix-workflow',
-    description: 'Standard workflow for investigating and fixing bugs',
-    steps: [
-      'Read error logs and stack traces',
-      'Search codebase for related files',
-      'Identify root cause',
-      'Apply minimal fix',
-      'Verify fix with tests',
-    ],
-    allowedTools: ['mock_search', 'mock_file_write'],
-  });
-
-  ruleStore.add({
-    id: generateId(),
-    name: 'minimal-change-principle',
-    ruleText: 'Always prefer the smallest possible change. Do not refactor unrelated code.',
-    priority: 10,
-    scope: 'global',
-  });
-  ruleStore.add({
-    id: generateId(),
-    name: 'verify-before-commit',
-    ruleText: 'Never commit changes without verifying they work first.',
-    priority: 9,
-    scope: 'global',
-  });
-
-  console.log(`  Knowledge items: ${knowledgeStore.count()}`);
-  console.log(`  Skills:          ${skillStore.count()}`);
-  console.log(`  Rules:           ${ruleStore.count()}`);
-
-  // ── Phase B: Tool & Permission Setup ──────────────────────────────────
-  separator('Phase B: Registering Tools & Permission Rules');
-
   const toolRegistry = new ToolRegistry();
   registerMockTools(toolRegistry);
 
@@ -113,11 +58,77 @@ async function main(): Promise<void> {
     reason: 'File write requires confirmation',
   });
 
-  console.log(`  Registered tools: ${toolRegistry.listNames().join(', ')}`);
-  console.log(`  Permission rules: ${permissionEngine.listRules().length}`);
+  const runtime = new QueryRuntime({
+    toolRegistry,
+    permissionEngine,
+    knowledgeStore,
+    skillStore,
+    ruleStore,
+  });
+  const entry = new SubmitEntry(runtime);
 
-  // ── Phase C: Doctor Health Check ──────────────────────────────────────
-  separator('Phase C: Doctor Health Check');
+  // ── Phase A: Guided Injection through unified Submit Entry ────────────
+  separator('Phase A: Guided Injection via Unified Submit Entry');
+
+  console.log('\n  Submitting injection payload through SubmitEntry...');
+
+  const injectionResult = await entry.submit(
+    'Onboard project context for userclaw development',
+    {
+      source: 'guided_injection',
+      triggerMode: 'injection',
+      structuredPayload: {
+        knowledge: [
+          {
+            title: 'Project Tech Stack',
+            content: 'The project uses TypeScript, Node.js, and follows a layered runtime architecture.',
+            tags: ['tech', 'stack'],
+          },
+          {
+            title: 'API Conventions',
+            content: 'All API responses use { ok, data, error } envelope. Errors include category and retryable flag.',
+            tags: ['api', 'conventions'],
+          },
+        ],
+        skills: [
+          {
+            name: 'bugfix-workflow',
+            description: 'Standard workflow for investigating and fixing bugs',
+            steps: [
+              'Read error logs and stack traces',
+              'Search codebase for related files',
+              'Identify root cause',
+              'Apply minimal fix',
+              'Verify fix with tests',
+            ],
+          },
+        ],
+        rules: [
+          {
+            name: 'minimal-change-principle',
+            ruleText: 'Always prefer the smallest possible change. Do not refactor unrelated code.',
+            priority: 10,
+          },
+          {
+            name: 'verify-before-commit',
+            ruleText: 'Never commit changes without verifying they work first.',
+            priority: 9,
+          },
+        ],
+      },
+    },
+  );
+
+  printJson('Injection Session', injectionResult.session);
+  printJson('Injection Result', injectionResult.toolResults);
+
+  console.log(`\n  After injection — stores now contain:`);
+  console.log(`    Knowledge items: ${knowledgeStore.count()}`);
+  console.log(`    Skills:          ${skillStore.count()}`);
+  console.log(`    Rules:           ${ruleStore.count()}`);
+
+  // ── Phase B: Doctor Health Check ──────────────────────────────────────
+  separator('Phase B: Doctor Health Check');
 
   const doctor = new Doctor({
     toolRegistry,
@@ -129,17 +140,8 @@ async function main(): Promise<void> {
   const report = doctor.run();
   printJson('Doctor Report', report);
 
-  // ── Phase D: Submit & Execute ─────────────────────────────────────────
-  separator('Phase D: Natural Language Task Execution');
-
-  const runtime = new QueryRuntime({
-    toolRegistry,
-    permissionEngine,
-    knowledgeStore,
-    skillStore,
-    ruleStore,
-  });
-  const entry = new SubmitEntry(runtime);
+  // ── Phase C: Natural Language Task Execution ──────────────────────────
+  separator('Phase C: Natural Language Task Execution');
 
   console.log('\n  Submitting task: "Find information about our API conventions and update the docs"');
 
@@ -155,22 +157,23 @@ async function main(): Promise<void> {
     printJson('Execution Error', result.error);
   }
 
-  // ── Phase E: State Flow Summary ───────────────────────────────────────
-  separator('Phase E: State Flow Summary');
+  // ── Phase D: State Flow Summary ───────────────────────────────────────
+  separator('Phase D: State Flow Summary');
 
   console.log(`
-  The Query Runtime drove the following state transitions:
+  Injection chain (Phase A):
+    idle → dispatching → running → ${injectionResult.session.state}
+    taskType: ${injectionResult.session.taskType}
 
-    idle → dispatching → running → ${result.session.state}
-
-  ${result.session.state === 'completed'
-    ? 'The full chain completed successfully through unified runtime.'
-    : `Final state: ${result.session.state} (reason: ${result.session.failureReason ?? 'N/A'})`}
+  Execution chain (Phase C):
+    idle → dispatching → running → waiting_permission → running → ${result.session.state}
+    taskType: ${result.session.taskType}
 
   Layers exercised:
-    [✓] Unified Submit Entry
+    [✓] Unified Submit Entry (both injection and execution)
     [✓] Query Runtime with explicit state machine
-    [✓] Tool Registry & Tool Contract
+    [✓] Guided injection → knowledge/skill/rule deposit via runtime
+    [✓] Tool Registry & Tool Contract (with per-tool input validation)
     [✓] Tool Executor
     [✓] Permission Engine (ask → auto-approved for demo)
     [✓] Knowledge Store (${knowledgeStore.count()} items)
