@@ -73,6 +73,11 @@ interface ModelPlanningResult {
   error?: ExecutionError;
 }
 
+interface StructuredToolCallInput {
+  toolName: string;
+  input?: unknown;
+}
+
 export class QueryRuntime {
   private deps: QueryRuntimeDeps;
   private sessionStore: SessionStore;
@@ -180,7 +185,10 @@ export class QueryRuntime {
         session.id,
       );
 
-      for (const tc of modelPlanning.toolCalls) {
+      const structuredToolCalls = this.extractStructuredToolCalls(request);
+      const plannedToolCalls = [...modelPlanning.toolCalls, ...structuredToolCalls];
+
+      for (const tc of plannedToolCalls) {
         const spec = this.deps.toolRegistry.get(tc.toolName);
         if (!spec) {
           toolResults.push({
@@ -328,6 +336,28 @@ export class QueryRuntime {
 
   private getPermissionDecisionsSince(startIndex: number): PermissionDecisionEvent[] {
     return this.deps.permissionEngine.listDecisionLog().slice(startIndex);
+  }
+
+  private extractStructuredToolCalls(request: SubmitRequest): ToolCall[] {
+    const payload = request.structuredPayload as { toolCalls?: unknown } | undefined;
+    if (!payload || !Array.isArray(payload.toolCalls)) {
+      return [];
+    }
+
+    return payload.toolCalls
+      .filter((item): item is StructuredToolCallInput => {
+        if (!item || typeof item !== 'object') {
+          return false;
+        }
+        const maybe = item as Partial<StructuredToolCallInput>;
+        return typeof maybe.toolName === 'string' && maybe.toolName.trim().length > 0;
+      })
+      .map((item) => ({
+        id: generateId(),
+        toolName: item.toolName.trim(),
+        input: item.input,
+        invokedAt: new Date().toISOString(),
+      }));
   }
 
   private resolveTaskType(request: SubmitRequest): QuerySession['taskType'] {
@@ -685,7 +715,22 @@ export class QueryRuntime {
           wallTimeMs: result.metrics.wallTimeMs,
           toolExecutionMs: result.metrics.toolExecutionMs,
           permissionDecisionCount: result.permissionDecisions.length,
+          permissionDecisions: result.permissionDecisions.map((event) => ({
+            toolName: event.toolName,
+            targetPath: event.targetPath,
+            decision: event.decision,
+            scope: event.scope,
+            reason: event.reason,
+            source: event.source,
+            timestamp: event.timestamp,
+          })),
           toolResultCount: result.toolResults.length,
+          toolResultPreview: result.toolResults.map((toolResult) => ({
+            ok: toolResult.ok,
+            previewText: toolResult.previewText,
+            errorCode: toolResult.errorCode,
+            artifactUri: toolResult.artifactUri,
+          })),
           assistantArtifactUri: result.assistantOutput?.artifactUri,
           traceArtifactUri: result.traceArtifactUri,
         },

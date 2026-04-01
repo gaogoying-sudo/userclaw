@@ -11,7 +11,10 @@
 import { ToolRegistry } from './tools/tool-registry.js';
 import { registerCoreTools } from './tools/index.js';
 import { PermissionEngine } from './permissions/permission-engine.js';
-import { createAutoApprovePermissionCallback } from './permissions/permission-callback.js';
+import {
+  createCliPermissionCallback,
+  createScriptedPermissionCallback,
+} from './permissions/permission-callback.js';
 import { KnowledgeStore } from './knowledge/knowledge-store.js';
 import { SkillStore } from './skills/skill-store.js';
 import { RuleStore } from './rules/rule-store.js';
@@ -38,10 +41,11 @@ function printJson(label: string, obj: unknown): void {
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  separator('userclaw V1 Phase 4 Runtime Hardening Demo');
+  separator('userclaw V1 Phase 5 Minimal Interaction & Permission Confirmation Demo');
 
   const dataRoot = resolveDataRoot();
   const modelConfig = loadModelConfig();
+  const interactivePermission = process.env.USERCLAW_DEMO_INTERACTIVE_PERMISSION === '1';
 
   // ── Setup: Local persistence-backed stores ─────────────────────────────
   const knowledgeStore = new KnowledgeStore({ dataRoot });
@@ -53,7 +57,20 @@ async function main(): Promise<void> {
 
   const permissionEngine = new PermissionEngine({
     dataRoot,
-    requestPermission: createAutoApprovePermissionCallback('session'),
+    requestPermission: interactivePermission
+      ? createCliPermissionCallback()
+      : createScriptedPermissionCallback([
+        {
+          decision: 'allow',
+          scope: 'session',
+          reason: 'Demo scripted user choice: allow for session',
+        },
+        {
+          decision: 'deny',
+          scope: 'once',
+          reason: 'Demo scripted user choice: deny once',
+        },
+      ]),
   });
   // Keep one explicit path-level rule to prove permission layer stays wired.
   permissionEngine.addRule({
@@ -88,6 +105,7 @@ async function main(): Promise<void> {
   console.log(`    Rules:           ${ruleStore.count()}`);
   console.log(`    Tools:           ${toolRegistry.count()}`);
   console.log(`    Permission rules:${permissionEngine.listRules().length}`);
+  console.log(`    Permission mode: ${interactivePermission ? 'interactive-cli' : 'scripted-demo'}`);
   console.log(`    Sessions dir:    ${sessionStore.getSessionDir()}`);
   console.log(`    History dir:     ${sessionStore.getHistoryDir()}`);
   console.log(`    Artifacts dir:   ${sessionStore.getArtifactDir()}`);
@@ -188,52 +206,118 @@ async function main(): Promise<void> {
   const report = doctor.run();
   printJson('Doctor Report', report);
 
-  // ── Phase D: Real Model Execution Loop ────────────────────────────────
-  separator('Phase D: First Real Usable Loop');
+  // ── Phase D: Permission Confirmation Run 1 (ask -> allow session) ─────
+  separator('Phase D: Permission Run 1 (ask -> allow session)');
 
-  console.log('\n  Submitting task: "Use current project context to draft a safe runtime execution note."');
+  console.log('\n  Submitting execution with explicit file_write tool call...');
 
-  const run = await entry.submit(
-    'Use current project context to draft a safe runtime execution note. Respect high-priority rules.',
+  const run1 = await entry.submit(
+    'Write runtime note to generated path with permission confirmation',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'file_write',
+            input: {
+              path: 'userclaw-data/generated/phase5-session.txt',
+              content: 'phase5 demo: first write with ask->allow(session)\n',
+            },
+          },
+        ],
+      },
+    },
   );
 
-  printJson('Run Session', run.session);
-  printJson('Run Assistant Response', run.assistantResponse);
-  printJson('Run Assistant Output', run.assistantOutput);
-  printJson('Run Model Trace', run.modelTrace);
-  printJson('Run Trace Artifact', run.traceArtifactUri);
-  printJson('Run Tool Results', run.toolResults);
-  printJson('Run Permission Decisions', run.permissionDecisions);
-  printJson('Run Metrics', run.metrics);
-
-  if (run.error) {
-    printJson('Run Error', run.error);
+  printJson('Run 1 Session', run1.session);
+  printJson('Run 1 Tool Results', run1.toolResults);
+  printJson('Run 1 Permission Decisions', run1.permissionDecisions);
+  if (run1.error) {
+    printJson('Run 1 Error', run1.error);
   }
 
-  // ── Phase E: Closure Summary ──────────────────────────────────────────
-  separator('Phase E: Closure Summary');
+  // ── Phase E: Permission Confirmation Run 2 (session rule reuse) ───────
+  separator('Phase E: Permission Run 2 (session scope reused)');
+
+  const run2 = await entry.submit(
+    'Write runtime note again, should reuse session scope rule',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'file_write',
+            input: {
+              path: 'userclaw-data/generated/phase5-session.txt',
+              content: 'phase5 demo: second write should reuse session rule\n',
+            },
+          },
+        ],
+      },
+    },
+  );
+
+  printJson('Run 2 Session', run2.session);
+  printJson('Run 2 Tool Results', run2.toolResults);
+  printJson('Run 2 Permission Decisions', run2.permissionDecisions);
+  if (run2.error) {
+    printJson('Run 2 Error', run2.error);
+  }
+
+  // ── Phase F: Permission Confirmation Run 3 (ask -> deny) ──────────────
+  separator('Phase F: Permission Run 3 (ask -> deny)');
+
+  const run3 = await entry.submit(
+    'Write runtime note to a different path and deny the action',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'file_write',
+            input: {
+              path: 'userclaw-data/generated/phase5-deny.txt',
+              content: 'phase5 demo: this write should be denied\n',
+            },
+          },
+        ],
+      },
+    },
+  );
+
+  printJson('Run 3 Session', run3.session);
+  printJson('Run 3 Tool Results', run3.toolResults);
+  printJson('Run 3 Permission Decisions', run3.permissionDecisions);
+  if (run3.error) {
+    printJson('Run 3 Error', run3.error);
+  }
+
+  // ── Phase G: Closure Summary ──────────────────────────────────────────
+  separator('Phase G: Closure Summary');
 
   console.log(`
   Injection chain (Phase A):
     idle → dispatching → running → ${injectionResult.session.state}
     taskType: ${injectionResult.session.taskType}
 
-  Execution chain (Phase D):
-    idle → dispatching → running → ${run.session.state}
-    taskType: ${run.session.taskType}
-    model path: ${run.modelTrace?.usedMockFallback ? 'mock fallback' : 'real model'}
-    model id: ${run.modelTrace?.model ?? 'n/a'}
-    provider: ${run.modelTrace?.provider ?? 'n/a'}
-    trace artifact: ${run.traceArtifactUri ?? '(inline)'}
-    assistant artifact: ${run.assistantOutput?.artifactUri ?? '(inline)'}
-    context strategy: ${run.modelTrace?.contextStrategy ?? 'n/a'}
-    used knowledge ids: ${(run.modelTrace?.usedKnowledgeIds ?? []).join(', ') || '(none)'}
-    used skill ids: ${(run.modelTrace?.usedSkillIds ?? []).join(', ') || '(none)'}
-    used rule ids: ${(run.modelTrace?.usedRuleIds ?? []).join(', ') || '(none)'}
+  Execution run 1 (Phase D):
+    state: ${run1.session.state}
+    permission decisions: ${run1.permissionDecisions.length}
+    callback decision: ${run1.permissionDecisions.find((item) => item.source === 'callback')?.decision ?? 'n/a'}
+    callback scope: ${run1.permissionDecisions.find((item) => item.source === 'callback')?.scope ?? 'n/a'}
+
+  Execution run 2 (Phase E):
+    state: ${run2.session.state}
+    expected reuse source: rule:session
+    matched source: ${run2.permissionDecisions.find((item) => item.source === 'rule:session')?.source ?? 'n/a'}
+
+  Execution run 3 (Phase F):
+    state: ${run3.session.state}
+    deny source: ${run3.permissionDecisions.find((item) => item.decision === 'deny')?.source ?? 'n/a'}
+    error category: ${run3.error?.category ?? 'n/a'}
 
   Layers exercised:
     [✓] Unified Submit Entry (both injection and execution)
     [✓] Query Runtime with explicit state machine
+    [✓] Minimal permission confirmation interaction callback
+    [✓] ask -> allow(session) -> session reuse -> deny path
     [✓] Guided injection → knowledge/skill/rule deposit + local persistence
     [✓] Startup reload from local files (knowledge / skills / rules)
     [✓] Runtime context assembly (knowledge / skill / rule to model prompt)
