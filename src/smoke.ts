@@ -3,7 +3,7 @@ import path from 'node:path';
 import { ToolRegistry } from './tools/tool-registry.js';
 import { registerCoreTools } from './tools/index.js';
 import { PermissionEngine } from './permissions/permission-engine.js';
-import { createAutoApprovePermissionCallback } from './permissions/permission-callback.js';
+import { createScriptedPermissionCallback } from './permissions/permission-callback.js';
 import { KnowledgeStore } from './knowledge/knowledge-store.js';
 import { SkillStore } from './skills/skill-store.js';
 import { RuleStore } from './rules/rule-store.js';
@@ -29,7 +29,18 @@ async function main(): Promise<void> {
 
   const permissionEngine = new PermissionEngine({
     dataRoot,
-    requestPermission: createAutoApprovePermissionCallback('session'),
+    requestPermission: createScriptedPermissionCallback([
+      {
+        decision: 'allow',
+        scope: 'project',
+        reason: 'smoke scripted allow project',
+      },
+      {
+        decision: 'deny',
+        scope: 'once',
+        reason: 'smoke scripted deny once',
+      },
+    ]),
   });
 
   const runtime = new QueryRuntime({
@@ -52,16 +63,96 @@ async function main(): Promise<void> {
     },
   });
 
-  const run = await entry.submit('Use available context and provide a concise runtime check summary.');
+  const runAllowProject = await entry.submit(
+    'Smoke write with ask -> allow(project)',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'file_write',
+            input: {
+              path: 'userclaw-data/generated/smoke-project.txt',
+              content: 'smoke project scope write\n',
+            },
+          },
+        ],
+      },
+    },
+  );
 
-  assert(run.modelTrace, 'modelTrace should exist');
-  assert(run.modelTrace.contextTrace, 'contextTrace should exist');
-  assert(run.modelTrace.contextStrategy.length > 0, 'context strategy should be present');
-  assert(run.modelTrace.usedKnowledgeIds.length > 0, 'knowledge ids should be recorded');
-  assert(run.modelTrace.usedSkillIds.length > 0, 'skill ids should be recorded');
-  assert(run.modelTrace.usedRuleIds.length > 0, 'rule ids should be recorded');
-  assert(typeof run.metrics.modelId === 'string' && run.metrics.modelId.length > 0, 'metrics modelId should exist');
-  assert(typeof run.metrics.fallbackUsed === 'boolean', 'metrics fallback flag should exist');
+  assert(runAllowProject.modelTrace, 'modelTrace should exist');
+  assert(runAllowProject.modelTrace.contextTrace, 'contextTrace should exist');
+  assert(runAllowProject.modelTrace.contextStrategy.length > 0, 'context strategy should be present');
+  assert(runAllowProject.modelTrace.usedKnowledgeIds.length > 0, 'knowledge ids should be recorded');
+  assert(runAllowProject.modelTrace.usedSkillIds.length > 0, 'skill ids should be recorded');
+  assert(runAllowProject.modelTrace.usedRuleIds.length > 0, 'rule ids should be recorded');
+  assert(
+    runAllowProject.permissionDecisions.some(
+      (decision) => decision.source === 'callback' && decision.decision === 'allow' && decision.scope === 'project',
+    ),
+    'first permission decision should be callback allow(project)',
+  );
+  assert(typeof runAllowProject.metrics.modelId === 'string' && runAllowProject.metrics.modelId.length > 0, 'metrics modelId should exist');
+  assert(typeof runAllowProject.metrics.fallbackUsed === 'boolean', 'metrics fallback flag should exist');
+
+  const runDeny = await entry.submit(
+    'Smoke write with ask -> deny',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'file_write',
+            input: {
+              path: 'userclaw-data/generated/smoke-deny.txt',
+              content: 'smoke deny write\n',
+            },
+          },
+        ],
+      },
+    },
+  );
+  assert(runDeny.session.state === 'failed', 'deny run should fail');
+  assert(runDeny.error?.category === 'permission_denied', 'deny run should map to permission_denied');
+  assert(
+    runDeny.permissionDecisions.some(
+      (decision) => decision.source === 'callback' && decision.decision === 'deny',
+    ),
+    'deny run should contain callback deny decision',
+  );
+
+  const reloadedPermissionEngine = new PermissionEngine({ dataRoot });
+  const reloadedRuntime = new QueryRuntime({
+    toolRegistry,
+    permissionEngine: reloadedPermissionEngine,
+    knowledgeStore,
+    skillStore,
+    ruleStore,
+    sessionStore,
+  });
+  const reloadedEntry = new SubmitEntry(reloadedRuntime, undefined, sessionStore);
+  const runProjectReuse = await reloadedEntry.submit(
+    'Smoke write with project scope reuse',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'file_write',
+            input: {
+              path: 'userclaw-data/generated/smoke-project.txt',
+              content: 'smoke project scope reused\n',
+            },
+          },
+        ],
+      },
+    },
+  );
+  assert(runProjectReuse.session.state === 'completed', 'project scope reuse run should complete');
+  assert(
+    runProjectReuse.permissionDecisions.some(
+      (decision) => decision.source === 'rule:project' && decision.decision === 'allow',
+    ),
+    'project scope reuse should be resolved by project rule',
+  );
 
   const recent = sessionStore.listSessionRecords(10);
   assert(recent.length >= 2, 'session records should be persisted');
@@ -80,7 +171,9 @@ async function main(): Promise<void> {
   console.log(`[smoke] dataRoot=${dataRoot}`);
   console.log(`[smoke] sessionRecords=${recent.length}`);
   console.log(`[smoke] historyEntries=${historyEntries.length}`);
-  console.log(`[smoke] model=${run.modelTrace.model} fallback=${run.modelTrace.usedMockFallback}`);
+  console.log(`[smoke] model=${runAllowProject.modelTrace.model} fallback=${runAllowProject.modelTrace.usedMockFallback}`);
+  console.log(`[smoke] projectScopeReuse=${runProjectReuse.permissionDecisions.some((d) => d.source === 'rule:project')}`);
+  console.log(`[smoke] denyConfirmed=${runDeny.permissionDecisions.some((d) => d.decision === 'deny')}`);
 }
 
 main().catch((err) => {
@@ -88,4 +181,3 @@ main().catch((err) => {
   console.error(`[smoke] FAIL: ${message}`);
   process.exit(1);
 });
-
