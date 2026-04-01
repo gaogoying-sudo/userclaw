@@ -1,36 +1,71 @@
 /**
- * Knowledge Store — minimal in-memory store for KnowledgeItems.
+ * Knowledge Store — local-file-backed store for KnowledgeItems.
  *
  * Knowledge answers "what is this" and "what facts exist".
  * It does NOT decide how to act (that's skills) or what's forbidden (that's rules).
- *
- * Placeholder status: in-memory array; no persistence or indexing.
- * Phase 2 (Codex) will add persistence, embedding-based retrieval,
- * and structured import from guided injection flow.
  */
 
+import path from 'node:path';
 import type { KnowledgeItem } from '../shared/contracts.js';
+import { ensureDataLayerDir, resolveDataRoot } from '../shared/data-paths.js';
+import { loadKnowledgeItems } from './knowledge-loader.js';
+import { writeKnowledgeItem } from './knowledge-writer.js';
+
+export interface KnowledgeStoreOptions {
+  dataRoot?: string;
+  autoLoad?: boolean;
+}
 
 export class KnowledgeStore {
-  private items: KnowledgeItem[] = [];
+  private items = new Map<string, KnowledgeItem>();
+  private readonly dataRoot: string;
+  private readonly storageDir: string;
 
-  add(item: KnowledgeItem): void {
-    this.items.push(item);
+  constructor(options: KnowledgeStoreOptions = {}) {
+    this.dataRoot = resolveDataRoot(options.dataRoot);
+    this.storageDir = ensureDataLayerDir('knowledge', this.dataRoot);
+
+    if (options.autoLoad !== false) {
+      this.reloadFromDisk();
+    }
+  }
+
+  add(item: KnowledgeItem): string {
+    this.items.set(item.id, item);
+    return writeKnowledgeItem(this.storageDir, item);
   }
 
   get(id: string): KnowledgeItem | undefined {
-    return this.items.find((i) => i.id === id);
+    return this.items.get(id);
   }
 
   listIds(): string[] {
-    return this.items.map((i) => i.id);
+    return Array.from(this.items.keys());
   }
 
   listAll(): KnowledgeItem[] {
-    return [...this.items];
+    return Array.from(this.items.values());
   }
 
   count(): number {
-    return this.items.length;
+    return this.items.size;
+  }
+
+  reloadFromDisk(): number {
+    const loaded = loadKnowledgeItems(this.storageDir);
+    this.items = new Map(loaded.map((item) => [item.id, item]));
+    return this.items.size;
+  }
+
+  getStorageDir(): string {
+    return this.storageDir;
+  }
+
+  getDataRoot(): string {
+    return this.dataRoot;
+  }
+
+  resolveItemPath(id: string): string {
+    return path.join(this.storageDir, `${id}.json`);
   }
 }
