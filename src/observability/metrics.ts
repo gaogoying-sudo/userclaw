@@ -1,9 +1,8 @@
 /**
  * Metrics Collector — minimal per-session metrics tracking.
  *
- * Placeholder status: in-memory accumulation only; no export or dashboard.
- * Phase 2 (Codex) will add token counting from real model responses,
- * per-model cost breakdown, cache hit tracking, and metrics persistence.
+ * Current status: in-memory accumulation only; no export or dashboard.
+ * Token/cost accounting remains a placeholder for later phases.
  */
 
 import type { SessionMetrics } from '../shared/contracts.js';
@@ -11,7 +10,9 @@ import type { SessionMetrics } from '../shared/contracts.js';
 export class MetricsCollector {
   private sessionId: string;
   private toolExecMs = 0;
+  private modelCallMs = 0;
   private wallTimeMs = 0;
+  private modelId = 'mock-model-v1';
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -19,6 +20,13 @@ export class MetricsCollector {
 
   recordToolExecution(ms: number): void {
     this.toolExecMs += ms;
+  }
+
+  recordModelCall(ms: number, modelId?: string): void {
+    this.modelCallMs += ms;
+    if (modelId && modelId.trim().length > 0) {
+      this.modelId = modelId;
+    }
   }
 
   recordEnd(totalMs: number): void {
@@ -31,8 +39,8 @@ export class MetricsCollector {
       tokenUsage: 0, // placeholder: Phase 2 will count real tokens
       wallTimeMs: this.wallTimeMs,
       toolExecutionMs: this.toolExecMs,
-      modelCallMs: 0, // placeholder: Phase 2 will measure real model latency
-      modelId: 'mock-model-v1',
+      modelCallMs: this.modelCallMs,
+      modelId: this.modelId,
     };
   }
 }

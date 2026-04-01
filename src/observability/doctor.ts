@@ -4,10 +4,9 @@
  * Reports the health of core subsystems so operators can quickly
  * identify what layer is broken when something fails.
  *
- * Placeholder status: checks tool count, knowledge/skill/rule counts,
- * and permission mode. No real external dependency checks.
- * Phase 2 (Codex) will add model connectivity, MCP status,
- * API key validation, directory state checks, and plugin load status.
+ * Current status: checks tool count, knowledge/skill/rule counts,
+ * permission rule presence, and model config readiness.
+ * It does not perform live upstream connectivity probes.
  */
 
 import type { ToolRegistry } from '../tools/tool-registry.js';
@@ -15,6 +14,7 @@ import type { PermissionEngine } from '../permissions/permission-engine.js';
 import type { KnowledgeStore } from '../knowledge/knowledge-store.js';
 import type { SkillStore } from '../skills/skill-store.js';
 import type { RuleStore } from '../rules/rule-store.js';
+import { loadModelConfig } from '../models/model-config.js';
 
 export interface DoctorCheckResult {
   name: string;
@@ -104,15 +104,20 @@ export class Doctor {
     };
   }
 
-  /**
-   * Placeholder: always returns warn since no real model is configured.
-   * Phase 2 (Codex) will validate API keys / local model availability.
-   */
   private checkModelConfig(): DoctorCheckResult {
+    const config = loadModelConfig();
+    if (config.enabled && config.config) {
+      return {
+        name: 'model_config',
+        status: 'ok',
+        detail: `Real model enabled (${config.config.provider}:${config.config.modelName})`,
+      };
+    }
+
     return {
       name: 'model_config',
       status: 'warn',
-      detail: 'Using mock model (no real model configured)',
+      detail: config.reason ?? 'Real model not configured; runtime will use mock fallback',
     };
   }
 }

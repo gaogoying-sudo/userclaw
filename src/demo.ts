@@ -1,19 +1,10 @@
 /**
- * userclaw V1 Phase 2 Demo
+ * userclaw V1 Phase 3 Demo
  *
- * This script validates Phase 2 minimal real capability by running a complete
- * "inject → execute → return result" chain through all unified layers:
+ * This script validates the first real usable loop:
+ *   injection/load K/S/R -> runtime context assembly -> real model call (or explicit fallback) -> output.
  *
- *  1. Load knowledge / skill / rule from local storage
- *  2. Register real core tools in Tool Registry
- *  3. Configure Permission Engine
- *  4. Submit a natural-language task through unified Submit Entry
- *  5. Query Runtime drives state machine: idle → dispatching → running → completed/failed
- *  6. Tool calls go through Tool Contract and Permission checks
- *  7. Doctor runs a health check
- *  8. Metrics are collected
- *
- * Run:  npm run demo
+ * Run: npm run demo
  */
 
 import { ToolRegistry } from './tools/tool-registry.js';
@@ -27,6 +18,7 @@ import { QueryRuntime } from './runtime/query-runtime.js';
 import { SubmitEntry } from './submit/submit-entry.js';
 import { Doctor } from './observability/doctor.js';
 import { resolveDataRoot } from './shared/data-paths.js';
+import { loadModelConfig } from './models/model-config.js';
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -44,9 +36,10 @@ function printJson(label: string, obj: unknown): void {
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  separator('userclaw V1 Phase 2 Core Demo');
+  separator('userclaw V1 Phase 3 First Usable Flow Demo');
 
   const dataRoot = resolveDataRoot();
+  const modelConfig = loadModelConfig();
 
   // ── Setup: Local persistence-backed stores ─────────────────────────────
   const knowledgeStore = new KnowledgeStore({ dataRoot });
@@ -59,6 +52,7 @@ async function main(): Promise<void> {
     dataRoot,
     requestPermission: createAutoApprovePermissionCallback('session'),
   });
+  // Keep one explicit path-level rule to prove permission layer stays wired.
   permissionEngine.addRule({
     toolName: 'file_write',
     verdict: 'deny',
@@ -76,8 +70,14 @@ async function main(): Promise<void> {
   });
   const injectionEntry = new SubmitEntry(injectionRuntime);
 
-  separator('Phase 0: Startup Load');
+  separator('Phase 0: Startup & Model Mode');
   console.log(`\n  Data root: ${dataRoot}`);
+  console.log('  Model mode:');
+  if (modelConfig.enabled) {
+    console.log(`    [REAL] provider=${modelConfig.config?.provider} model=${modelConfig.config?.modelName}`);
+  } else {
+    console.log(`    [FALLBACK] ${modelConfig.reason ?? 'Model config missing'}`);
+  }
   console.log('  Loaded from disk:');
   console.log(`    Knowledge items: ${knowledgeStore.count()}`);
   console.log(`    Skills:          ${skillStore.count()}`);
@@ -179,66 +179,54 @@ async function main(): Promise<void> {
   const report = doctor.run();
   printJson('Doctor Report', report);
 
-  // ── Phase D: Natural Language Task Execution (allow/ask path) ─────────
-  separator('Phase D: Execution Run 1 (ask → allow)');
+  // ── Phase D: Real Model Execution Loop ────────────────────────────────
+  separator('Phase D: First Real Usable Loop');
 
-  console.log('\n  Submitting task: "Find API conventions and draft runtime notes"');
+  console.log('\n  Submitting task: "Use current project context to draft a safe runtime execution note."');
 
-  const run1 = await entry.submit(
-    'Find API conventions and draft runtime notes',
+  const run = await entry.submit(
+    'Use current project context to draft a safe runtime execution note. Respect high-priority rules.',
   );
 
-  printJson('Run 1 Session', run1.session);
-  printJson('Run 1 Tool Results', run1.toolResults);
-  printJson('Run 1 Permission Decisions', run1.permissionDecisions);
-  printJson('Run 1 Metrics', run1.metrics);
+  printJson('Run Session', run.session);
+  printJson('Run Assistant Response', run.assistantResponse);
+  printJson('Run Model Trace', run.modelTrace);
+  printJson('Run Tool Results', run.toolResults);
+  printJson('Run Permission Decisions', run.permissionDecisions);
+  printJson('Run Metrics', run.metrics);
 
-  if (run1.error) {
-    printJson('Run 1 Error', run1.error);
+  if (run.error) {
+    printJson('Run Error', run.error);
   }
 
-  // ── Phase E: Natural Language Task Execution (deny path) ──────────────
-  separator('Phase E: Execution Run 2 (deny by path rule)');
-
-  console.log('\n  Submitting task: "Find API conventions and update docs"');
-
-  const run2 = await entry.submit(
-    'Find API conventions and update docs',
-  );
-
-  printJson('Run 2 Session', run2.session);
-  printJson('Run 2 Tool Results', run2.toolResults);
-  printJson('Run 2 Permission Decisions', run2.permissionDecisions);
-  printJson('Run 2 Metrics', run2.metrics);
-
-  if (run2.error) {
-    printJson('Run 2 Error', run2.error);
-  }
-
-  // ── Phase F: State Flow Summary ───────────────────────────────────────
-  separator('Phase F: State Flow Summary');
+  // ── Phase E: Closure Summary ──────────────────────────────────────────
+  separator('Phase E: Closure Summary');
 
   console.log(`
   Injection chain (Phase A):
     idle → dispatching → running → ${injectionResult.session.state}
     taskType: ${injectionResult.session.taskType}
 
-  Execution chain 1 (Phase D):
-    idle → dispatching → running → waiting_permission → running → ${run1.session.state}
-    taskType: ${run1.session.taskType}
-
-  Execution chain 2 (Phase E):
-    idle → dispatching → running → waiting_permission → ${run2.session.state}
-    taskType: ${run2.session.taskType}
+  Execution chain (Phase D):
+    idle → dispatching → running → ${run.session.state}
+    taskType: ${run.session.taskType}
+    model path: ${run.modelTrace?.usedMockFallback ? 'mock fallback' : 'real model'}
+    model id: ${run.modelTrace?.model ?? 'n/a'}
+    provider: ${run.modelTrace?.provider ?? 'n/a'}
+    context strategy: ${run.modelTrace?.contextStrategy ?? 'n/a'}
+    used knowledge ids: ${(run.modelTrace?.usedKnowledgeIds ?? []).join(', ') || '(none)'}
+    used skill ids: ${(run.modelTrace?.usedSkillIds ?? []).join(', ') || '(none)'}
+    used rule ids: ${(run.modelTrace?.usedRuleIds ?? []).join(', ') || '(none)'}
 
   Layers exercised:
     [✓] Unified Submit Entry (both injection and execution)
     [✓] Query Runtime with explicit state machine
     [✓] Guided injection → knowledge/skill/rule deposit + local persistence
     [✓] Startup reload from local files (knowledge / skills / rules)
-    [✓] Tool Registry & Tool Contract with real tools and input validation
-    [✓] Tool Executor
-    [✓] Permission Engine (ask / allow / deny + scope + path rule + callback)
+    [✓] Runtime context assembly (knowledge / skill / rule to model prompt)
+    [✓] Real model path (if configured) with explicit fallback when config is missing
+    [✓] Tool Registry & Tool Contract remain wired for follow-up tool-use evolution
+    [✓] Permission Engine remains active (ask / allow / deny + scope + path rule + callback)
     [✓] Knowledge Store (${reloadedKnowledgeStore.count()} items)
     [✓] Skill Store (${reloadedSkillStore.count()} items)
     [✓] Rule Store (${reloadedRuleStore.count()} items)

@@ -8,10 +8,6 @@
  *  - Invoke Tool Runtime when needed
  *  - Consult Permission Engine before risky tool calls
  *  - Record minimal metrics
- *
- * Placeholder status: model call is mocked; tool loop runs 1 pass.
- * Phase 2 (Codex) will replace mock model call with real LLM integration,
- * add streaming, auto-compact, multi-turn tool loop, and abort handling.
  */
 
 import type {
@@ -33,6 +29,14 @@ import { SkillStore } from '../skills/skill-store.js';
 import { RuleStore } from '../rules/rule-store.js';
 import { MetricsCollector } from '../observability/metrics.js';
 import type { PermissionDecisionEvent } from '../permissions/permission-types.js';
+import { buildRuntimeModelContext } from './context-builder.js';
+import { loadModelConfig } from '../models/model-config.js';
+import { callModel } from '../models/model-client.js';
+import type {
+  ModelCallFailure,
+  ModelConfigState,
+  ModelProvider,
+} from '../models/model-types.js';
 
 export interface QueryRuntimeDeps {
   toolRegistry: ToolRegistry;
@@ -42,11 +46,32 @@ export interface QueryRuntimeDeps {
   ruleStore: RuleStore;
 }
 
+export interface QueryModelTrace {
+  provider: ModelProvider | 'mock';
+  model: string;
+  usedMockFallback: boolean;
+  fallbackReason?: string;
+  contextStrategy: string;
+  usedKnowledgeIds: string[];
+  usedSkillIds: string[];
+  usedRuleIds: string[];
+}
+
 export interface QueryRunResult {
   session: QuerySession;
   toolResults: ToolResult[];
   metrics: SessionMetrics;
   permissionDecisions: PermissionDecisionEvent[];
+  assistantResponse?: string;
+  modelTrace?: QueryModelTrace;
+  error?: ExecutionError;
+}
+
+interface ModelPlanningResult {
+  ok: boolean;
+  assistantResponse?: string;
+  toolCalls: ToolCall[];
+  modelTrace: QueryModelTrace;
   error?: ExecutionError;
 }
 
@@ -62,6 +87,7 @@ export class QueryRuntime {
     const metrics = new MetricsCollector(request.sessionId);
     const startTime = Date.now();
     const permissionLogStart = this.deps.permissionEngine.listDecisionLog().length;
+    const modelConfigState = loadModelConfig();
 
     const session: QuerySession = {
       id: generateId(),
@@ -78,13 +104,13 @@ export class QueryRuntime {
       sm.transition('dispatching');
       session.state = sm.state;
 
-      const runtimeCtx = this.buildRuntimeContext(request);
+      const runtimeCtx = this.buildRuntimeContext(request, modelConfigState);
 
       // -- running --
       sm.transition('running');
       session.state = sm.state;
 
-      // Branch by task type: injection deposits into stores; execution runs tools.
+      // Branch by task type: injection deposits into stores; execution runs model flow.
       if (session.taskType === 'injection') {
         const injectionResult = this.handleInjection(request);
         sm.transition('completed');
@@ -100,12 +126,37 @@ export class QueryRuntime {
         };
       }
 
-      // Mock model call: in Phase 2 this becomes a real LLM request that
-      // may return tool_use blocks in a streaming loop.
-      const modelDecision = await this.mockModelCall(request, runtimeCtx);
+      const modelStart = Date.now();
+      const modelPlanning = await this.planExecutionWithModel(request, runtimeCtx, modelConfigState);
+      metrics.recordModelCall(
+        Date.now() - modelStart,
+        modelPlanning.modelTrace.model,
+      );
 
-      // Process tool calls from model decision
-      for (const tc of modelDecision.toolCalls) {
+      if (!modelPlanning.ok || !modelPlanning.assistantResponse) {
+        sm.transition('failed');
+        session.state = sm.state;
+        session.failureReason = modelPlanning.error?.message ?? 'Model planning failed';
+        session.endedAt = new Date().toISOString();
+        metrics.recordEnd(Date.now() - startTime);
+
+        return {
+          session,
+          toolResults,
+          metrics: metrics.snapshot(),
+          permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+          modelTrace: modelPlanning.modelTrace,
+          error: modelPlanning.error ?? {
+            code: 'MODEL_PLANNING_FAILED',
+            message: session.failureReason,
+            category: 'model_error',
+            retryable: false,
+          },
+        };
+      }
+
+      // Process tool calls if future model output includes them.
+      for (const tc of modelPlanning.toolCalls) {
         const spec = this.deps.toolRegistry.get(tc.toolName);
         if (!spec) {
           toolResults.push({
@@ -117,7 +168,6 @@ export class QueryRuntime {
           continue;
         }
 
-        // Permission check
         if (spec.requiresPermission) {
           const decision = await this.deps.permissionEngine.evaluate(spec, tc.input, runtimeCtx);
           if (decision.decision === 'deny') {
@@ -139,6 +189,8 @@ export class QueryRuntime {
               toolResults,
               metrics: metrics.snapshot(),
               permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+              assistantResponse: modelPlanning.assistantResponse,
+              modelTrace: modelPlanning.modelTrace,
               error: {
                 code: 'PERMISSION_DENIED',
                 message: session.failureReason,
@@ -186,6 +238,8 @@ export class QueryRuntime {
                 ],
                 metrics: metrics.snapshot(),
                 permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+                assistantResponse: modelPlanning.assistantResponse,
+                modelTrace: modelPlanning.modelTrace,
                 error: {
                   code: 'PERMISSION_DENIED',
                   message: session.failureReason,
@@ -218,6 +272,8 @@ export class QueryRuntime {
         toolResults,
         metrics: metrics.snapshot(),
         permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+        assistantResponse: modelPlanning.assistantResponse,
+        modelTrace: modelPlanning.modelTrace,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -257,7 +313,10 @@ export class QueryRuntime {
     }
   }
 
-  private buildRuntimeContext(request: SubmitRequest): RuntimeContext {
+  private buildRuntimeContext(
+    request: SubmitRequest,
+    modelConfigState: ModelConfigState,
+  ): RuntimeContext {
     const knowledgeIds = this.deps.knowledgeStore.listIds();
     const skillIds = this.deps.skillStore.listIds();
     const ruleIds = this.deps.ruleStore.listIds();
@@ -272,8 +331,10 @@ export class QueryRuntime {
         ],
       },
       runtimeContext: {
-        modelMode: 'local',
-        selectedModel: 'mock-model-v1',
+        modelMode: modelConfigState.enabled ? 'remote' : 'local',
+        selectedModel: modelConfigState.enabled
+          ? modelConfigState.config?.modelName
+          : 'mock-fallback-v1',
         availableTools: this.deps.toolRegistry.listNames(),
         permissionMode: 'ask',
       },
@@ -292,10 +353,6 @@ export class QueryRuntime {
 
   /**
    * Handle guided injection: parse input and deposit into knowledge/skill/rule stores.
-   *
-   * Placeholder: uses mock parsing that extracts from structuredPayload or
-   * derives mock items from inputText. Phase 2 (Codex) will replace with
-   * real extraction (LLM-assisted or structured form parsing).
    */
   private handleInjection(request: SubmitRequest): ToolResult {
     const payload = request.structuredPayload ?? {};
@@ -306,7 +363,6 @@ export class QueryRuntime {
     const existingSkills = this.deps.skillStore.listAll();
     const existingRules = this.deps.ruleStore.listAll();
 
-    // Deposit knowledge items from payload or derive from text
     const knowledgeEntries = (payload.knowledge as Array<{ title: string; content: string; tags?: string[] }>) ?? [];
     if (knowledgeEntries.length === 0 && text) {
       knowledgeEntries.push({ title: 'Injected knowledge', content: text, tags: ['auto-injected'] });
@@ -328,7 +384,6 @@ export class QueryRuntime {
       deposited.push(`knowledge: "${k.title}"`);
     }
 
-    // Deposit skill items from payload
     const skillEntries = (payload.skills as Array<{ name: string; description: string; steps: string[] }>) ?? [];
     for (const s of skillEntries) {
       const duplicate = existingSkills.some((item) => item.name === s.name);
@@ -344,7 +399,6 @@ export class QueryRuntime {
       deposited.push(`skill: "${s.name}"`);
     }
 
-    // Deposit rule items from payload
     const ruleEntries = (payload.rules as Array<{ name: string; ruleText: string; priority: number }>) ?? [];
     for (const r of ruleEntries) {
       const duplicate = existingRules.some(
@@ -370,56 +424,139 @@ export class QueryRuntime {
     };
   }
 
-  /**
-   * Mock model call.
-   *
-   * Placeholder: returns a hardcoded tool call plan with per-tool valid inputs.
-   * Phase 2 (Codex) replaces with real LLM streaming call that
-   * parses tool_use blocks from the model response.
-   */
-  private async mockModelCall(
+  private async planExecutionWithModel(
     request: SubmitRequest,
-    _ctx: RuntimeContext,
-  ): Promise<{ response: string; toolCalls: ToolCall[] }> {
-    const availableTools = this.deps.toolRegistry.listNames();
-    const taskText = request.inputText ?? '';
+    ctx: RuntimeContext,
+    modelConfigState: ModelConfigState,
+  ): Promise<ModelPlanningResult> {
+    const context = buildRuntimeModelContext({
+      request,
+      runtimeContext: ctx,
+      knowledgeItems: this.deps.knowledgeStore.listAll(),
+      skillItems: this.deps.skillStore.listAll(),
+      ruleItems: this.deps.ruleStore.listAll(),
+    });
 
-    const toolCalls: ToolCall[] = availableTools.map((name) => ({
-      id: generateId(),
-      toolName: name,
-      input: this.buildMockToolInput(name, taskText),
-      invokedAt: new Date().toISOString(),
-    }));
+    const response = await callModel(
+      {
+        systemPrompt: context.systemPrompt,
+        userPrompt: context.userPrompt,
+      },
+      modelConfigState,
+    );
+
+    if (response.ok) {
+      return {
+        ok: true,
+        assistantResponse: response.text,
+        toolCalls: [],
+        modelTrace: {
+          provider: response.provider,
+          model: response.modelName,
+          usedMockFallback: false,
+          contextStrategy: context.contextStrategy,
+          usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
+          usedSkillIds: context.usedSkills.map((item) => item.id),
+          usedRuleIds: context.usedRules.map((item) => item.id),
+        },
+      };
+    }
+
+    const fallback = this.tryMockFallback(response, request, context.contextStrategy, context);
+    if (fallback) {
+      return fallback;
+    }
 
     return {
-      response: `[mock-model] Analyzed task "${taskText}". Invoking ${toolCalls.length} tool(s).`,
-      toolCalls,
+      ok: false,
+      toolCalls: [],
+      modelTrace: {
+        provider: 'openai_compatible',
+        model: modelConfigState.config?.modelName ?? 'unknown-model',
+        usedMockFallback: false,
+        contextStrategy: context.contextStrategy,
+        usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
+        usedSkillIds: context.usedSkills.map((item) => item.id),
+        usedRuleIds: context.usedRules.map((item) => item.id),
+      },
+      error: this.mapModelFailureToExecutionError(response),
     };
   }
 
-  /**
-   * Generate schema-compliant mock input per tool name.
-   * Ensures Tool Contract validation actually exercises real checks.
-   */
-  private buildMockToolInput(toolName: string, taskText: string): unknown {
-    const lowerTask = taskText.toLowerCase();
+  private tryMockFallback(
+    failure: ModelCallFailure,
+    request: SubmitRequest,
+    contextStrategy: string,
+    context: ReturnType<typeof buildRuntimeModelContext>,
+  ): ModelPlanningResult | undefined {
+    if (failure.code !== 'MODEL_CONFIG_MISSING' && failure.code !== 'MODEL_API_KEY_MISSING') {
+      return undefined;
+    }
 
-    switch (toolName) {
-      case 'file_read':
-        return { path: 'docs/planning/userclaw-v1-project-charter.md', maxBytes: 5000 };
-      case 'file_write':
+    const goal = request.inputText ?? 'No goal specified';
+    const knowledgeHint = context.usedKnowledge.map((item) => item.title).slice(0, 2).join(', ') || 'none';
+    const skillHint = context.usedSkills.map((item) => item.name).slice(0, 1).join(', ') || 'none';
+    const ruleHint = context.usedRules.map((item) => item.name).slice(0, 2).join(', ') || 'none';
+
+    const assistantResponse = [
+      '[mock-fallback] Real model is not configured; returning a deterministic fallback response.',
+      `Reason: ${failure.message}`,
+      `Task: ${goal}`,
+      `Knowledge hints: ${knowledgeHint}`,
+      `Skill hints: ${skillHint}`,
+      `Rule hints: ${ruleHint}`,
+      'Suggested next step: set USERCLAW_MODEL_API_KEY (and optionally USERCLAW_MODEL_BASE_URL / USERCLAW_MODEL_NAME) to enable real model execution.',
+    ].join('\n');
+
+    return {
+      ok: true,
+      assistantResponse,
+      toolCalls: [],
+      modelTrace: {
+        provider: 'mock',
+        model: 'mock-fallback-v1',
+        usedMockFallback: true,
+        fallbackReason: failure.message,
+        contextStrategy,
+        usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
+        usedSkillIds: context.usedSkills.map((item) => item.id),
+        usedRuleIds: context.usedRules.map((item) => item.id),
+      },
+    };
+  }
+
+  private mapModelFailureToExecutionError(failure: ModelCallFailure): ExecutionError {
+    switch (failure.code) {
+      case 'MODEL_HTTP_ERROR':
         return {
-          path: lowerTask.includes('docs')
-            ? 'docs/runtime-generated.md'
-            : 'userclaw-data/generated/runtime-notes.md',
-          content: `Generated from task: ${taskText}\n`,
+          code: failure.code,
+          message: failure.message,
+          category: 'model_error',
+          retryable: failure.retryable,
         };
-      case 'directory_list':
-        return { path: 'src', maxEntries: 20 };
-      case 'local_search':
-        return { query: taskText, path: 'src', maxResults: 8 };
+      case 'MODEL_NETWORK_ERROR':
+        return {
+          code: failure.code,
+          message: failure.message,
+          category: 'external_connection_error',
+          retryable: true,
+        };
+      case 'MODEL_RESPONSE_INVALID':
+        return {
+          code: failure.code,
+          message: failure.message,
+          category: 'model_error',
+          retryable: false,
+        };
+      case 'MODEL_CONFIG_MISSING':
+      case 'MODEL_API_KEY_MISSING':
       default:
-        return { query: taskText };
+        return {
+          code: failure.code,
+          message: failure.message,
+          category: 'validation_error',
+          retryable: false,
+        };
     }
   }
 }
