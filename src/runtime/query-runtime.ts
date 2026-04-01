@@ -1,13 +1,11 @@
 /**
  * Query Runtime — the main orchestrator for a single execution turn.
  *
- * Responsibilities:
- *  - Receive a SubmitRequest
- *  - Build QuerySession + RuntimeContext
- *  - Drive the state machine through dispatching → running → completed/failed
- *  - Invoke Tool Runtime when needed
- *  - Consult Permission Engine before risky tool calls
- *  - Record minimal metrics
+ * Phase 4 hardening scope:
+ *  - stable context/trace output
+ *  - unified error categorization
+ *  - assistant artifact strategy for large outputs
+ *  - minimal session/history persistence
  */
 
 import type {
@@ -35,8 +33,16 @@ import { callModel } from '../models/model-client.js';
 import type {
   ModelCallFailure,
   ModelConfigState,
-  ModelProvider,
 } from '../models/model-types.js';
+import {
+  createAssistantOutput,
+  type AssistantOutput,
+  type QueryModelTrace,
+} from './runtime-trace.js';
+import { SessionStore } from '../session/session-store.js';
+import type { SessionRecord } from '../session/session-types.js';
+
+const TRACE_ARTIFACT_THRESHOLD = 2200;
 
 export interface QueryRuntimeDeps {
   toolRegistry: ToolRegistry;
@@ -44,17 +50,7 @@ export interface QueryRuntimeDeps {
   knowledgeStore: KnowledgeStore;
   skillStore: SkillStore;
   ruleStore: RuleStore;
-}
-
-export interface QueryModelTrace {
-  provider: ModelProvider | 'mock';
-  model: string;
-  usedMockFallback: boolean;
-  fallbackReason?: string;
-  contextStrategy: string;
-  usedKnowledgeIds: string[];
-  usedSkillIds: string[];
-  usedRuleIds: string[];
+  sessionStore?: SessionStore;
 }
 
 export interface QueryRunResult {
@@ -63,7 +59,9 @@ export interface QueryRunResult {
   metrics: SessionMetrics;
   permissionDecisions: PermissionDecisionEvent[];
   assistantResponse?: string;
+  assistantOutput?: AssistantOutput;
   modelTrace?: QueryModelTrace;
+  traceArtifactUri?: string;
   error?: ExecutionError;
 }
 
@@ -77,9 +75,12 @@ interface ModelPlanningResult {
 
 export class QueryRuntime {
   private deps: QueryRuntimeDeps;
+  private sessionStore: SessionStore;
 
   constructor(deps: QueryRuntimeDeps) {
     this.deps = deps;
+    this.sessionStore = deps.sessionStore
+      ?? new SessionStore({ dataRoot: deps.knowledgeStore.getDataRoot() });
   }
 
   async execute(request: SubmitRequest): Promise<QueryRunResult> {
@@ -99,38 +100,58 @@ export class QueryRuntime {
 
     const toolResults: ToolResult[] = [];
 
+    const finalize = (payload: {
+      assistantOutput?: AssistantOutput;
+      modelTrace?: QueryModelTrace;
+      traceArtifactUri?: string;
+      error?: ExecutionError;
+    }): QueryRunResult => {
+      const result: QueryRunResult = {
+        session,
+        toolResults: [...toolResults],
+        metrics: metrics.snapshot(),
+        permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+        assistantOutput: payload.assistantOutput,
+        assistantResponse: payload.assistantOutput?.fullText ?? payload.assistantOutput?.previewText,
+        modelTrace: payload.modelTrace,
+        traceArtifactUri: payload.traceArtifactUri,
+        error: payload.error,
+      };
+      this.persistRunRecord(request, result);
+      return result;
+    };
+
     try {
-      // -- dispatching --
       sm.transition('dispatching');
       session.state = sm.state;
 
       const runtimeCtx = this.buildRuntimeContext(request, modelConfigState);
 
-      // -- running --
       sm.transition('running');
       session.state = sm.state;
 
-      // Branch by task type: injection deposits into stores; execution runs model flow.
       if (session.taskType === 'injection') {
         const injectionResult = this.handleInjection(request);
+        toolResults.push(injectionResult);
+
         sm.transition('completed');
         session.state = sm.state;
         session.endedAt = new Date().toISOString();
         metrics.recordEnd(Date.now() - startTime);
-        toolResults.push(injectionResult);
-        return {
-          session,
-          toolResults,
-          metrics: metrics.snapshot(),
-          permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
-        };
+
+        return finalize({});
       }
 
       const modelStart = Date.now();
       const modelPlanning = await this.planExecutionWithModel(request, runtimeCtx, modelConfigState);
-      metrics.recordModelCall(
-        Date.now() - modelStart,
-        modelPlanning.modelTrace.model,
+      metrics.recordModelCall(Date.now() - modelStart, modelPlanning.modelTrace.model);
+      metrics.recordFallbackUsed(modelPlanning.modelTrace.usedMockFallback);
+
+      const traceArtifactUri = this.maybePersistTraceArtifact(
+        request.sessionId,
+        request.id,
+        session.id,
+        modelPlanning.modelTrace,
       );
 
       if (!modelPlanning.ok || !modelPlanning.assistantResponse) {
@@ -140,22 +161,25 @@ export class QueryRuntime {
         session.endedAt = new Date().toISOString();
         metrics.recordEnd(Date.now() - startTime);
 
-        return {
-          session,
-          toolResults,
-          metrics: metrics.snapshot(),
-          permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+        return finalize({
           modelTrace: modelPlanning.modelTrace,
+          traceArtifactUri,
           error: modelPlanning.error ?? {
             code: 'MODEL_PLANNING_FAILED',
             message: session.failureReason,
-            category: 'model_error',
+            category: 'runtime_error',
             retryable: false,
           },
-        };
+        });
       }
 
-      // Process tool calls if future model output includes them.
+      const assistantOutput = this.buildAssistantOutput(
+        modelPlanning.assistantResponse,
+        request.sessionId,
+        request.id,
+        session.id,
+      );
+
       for (const tc of modelPlanning.toolCalls) {
         const spec = this.deps.toolRegistry.get(tc.toolName);
         if (!spec) {
@@ -179,26 +203,26 @@ export class QueryRuntime {
               errorCode: 'PERMISSION_DENIED',
               errorMessage: decision.reason,
             });
+
             sm.transition('failed');
             session.state = sm.state;
             session.failureReason = `Permission denied for tool ${tc.toolName}`;
             session.endedAt = new Date().toISOString();
             metrics.recordEnd(Date.now() - startTime);
-            return {
-              session,
-              toolResults,
-              metrics: metrics.snapshot(),
-              permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
-              assistantResponse: modelPlanning.assistantResponse,
+
+            return finalize({
+              assistantOutput,
               modelTrace: modelPlanning.modelTrace,
+              traceArtifactUri,
               error: {
                 code: 'PERMISSION_DENIED',
                 message: session.failureReason,
                 category: 'permission_denied',
                 retryable: false,
               },
-            };
+            });
           }
+
           if (decision.decision === 'ask') {
             sm.transition('waiting_permission');
             session.state = sm.state;
@@ -225,28 +249,18 @@ export class QueryRuntime {
               session.failureReason = `Permission ${finalDecision.decision} for tool ${tc.toolName}`;
               session.endedAt = new Date().toISOString();
               metrics.recordEnd(Date.now() - startTime);
-              return {
-                session,
-                toolResults: [
-                  ...toolResults,
-                  {
-                    ok: false,
-                    previewText: `Permission ${finalDecision.decision}: ${finalDecision.reason ?? 'no reason'}`,
-                    errorCode: 'PERMISSION_DENIED',
-                    errorMessage: finalDecision.reason,
-                  },
-                ],
-                metrics: metrics.snapshot(),
-                permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
-                assistantResponse: modelPlanning.assistantResponse,
+
+              return finalize({
+                assistantOutput,
                 modelTrace: modelPlanning.modelTrace,
+                traceArtifactUri,
                 error: {
                   code: 'PERMISSION_DENIED',
                   message: session.failureReason,
                   category: 'permission_denied',
                   retryable: false,
                 },
-              };
+              });
             }
 
             sm.transition('running');
@@ -259,22 +273,38 @@ export class QueryRuntime {
         const result = await executor.execute(tc, runtimeCtx);
         metrics.recordToolExecution(Date.now() - toolStart);
         toolResults.push(result);
+
+        if (!result.ok && result.errorCode === 'VALIDATION_ERROR') {
+          sm.transition('failed');
+          session.state = sm.state;
+          session.failureReason = `Tool input validation failed for ${tc.toolName}`;
+          session.endedAt = new Date().toISOString();
+          metrics.recordEnd(Date.now() - startTime);
+
+          return finalize({
+            assistantOutput,
+            modelTrace: modelPlanning.modelTrace,
+            traceArtifactUri,
+            error: {
+              code: 'TOOL_VALIDATION_ERROR',
+              message: session.failureReason,
+              category: 'tool_validation_error',
+              retryable: false,
+            },
+          });
+        }
       }
 
-      // -- completed --
       sm.transition('completed');
       session.state = sm.state;
       session.endedAt = new Date().toISOString();
       metrics.recordEnd(Date.now() - startTime);
 
-      return {
-        session,
-        toolResults,
-        metrics: metrics.snapshot(),
-        permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
-        assistantResponse: modelPlanning.assistantResponse,
+      return finalize({
+        assistantOutput,
         modelTrace: modelPlanning.modelTrace,
-      };
+        traceArtifactUri,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!sm.isTerminal()) {
@@ -285,18 +315,14 @@ export class QueryRuntime {
       session.endedAt = new Date().toISOString();
       metrics.recordEnd(Date.now() - startTime);
 
-      return {
-        session,
-        toolResults,
-        metrics: metrics.snapshot(),
-        permissionDecisions: this.getPermissionDecisionsSince(permissionLogStart),
+      return finalize({
         error: {
           code: 'RUNTIME_ERROR',
           message,
           category: 'runtime_error',
           retryable: false,
         },
-      };
+      });
     }
   }
 
@@ -351,9 +377,6 @@ export class QueryRuntime {
     };
   }
 
-  /**
-   * Handle guided injection: parse input and deposit into knowledge/skill/rule stores.
-   */
   private handleInjection(request: SubmitRequest): ToolResult {
     const payload = request.structuredPayload ?? {};
     const text = request.inputText ?? '';
@@ -458,6 +481,7 @@ export class QueryRuntime {
           usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
           usedSkillIds: context.usedSkills.map((item) => item.id),
           usedRuleIds: context.usedRules.map((item) => item.id),
+          contextTrace: context.contextTrace,
         },
       };
     }
@@ -478,6 +502,7 @@ export class QueryRuntime {
         usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
         usedSkillIds: context.usedSkills.map((item) => item.id),
         usedRuleIds: context.usedRules.map((item) => item.id),
+        contextTrace: context.contextTrace,
       },
       error: this.mapModelFailureToExecutionError(response),
     };
@@ -521,6 +546,7 @@ export class QueryRuntime {
         usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
         usedSkillIds: context.usedSkills.map((item) => item.id),
         usedRuleIds: context.usedRules.map((item) => item.id),
+        contextTrace: context.contextTrace,
       },
     };
   }
@@ -528,24 +554,18 @@ export class QueryRuntime {
   private mapModelFailureToExecutionError(failure: ModelCallFailure): ExecutionError {
     switch (failure.code) {
       case 'MODEL_HTTP_ERROR':
-        return {
-          code: failure.code,
-          message: failure.message,
-          category: 'model_error',
-          retryable: failure.retryable,
-        };
       case 'MODEL_NETWORK_ERROR':
         return {
           code: failure.code,
           message: failure.message,
-          category: 'external_connection_error',
-          retryable: true,
+          category: 'model_http_error',
+          retryable: failure.retryable,
         };
       case 'MODEL_RESPONSE_INVALID':
         return {
           code: failure.code,
           message: failure.message,
-          category: 'model_error',
+          category: 'model_response_error',
           retryable: false,
         };
       case 'MODEL_CONFIG_MISSING':
@@ -554,9 +574,126 @@ export class QueryRuntime {
         return {
           code: failure.code,
           message: failure.message,
-          category: 'validation_error',
+          category: 'model_config_error',
           retryable: false,
         };
+    }
+  }
+
+  private buildAssistantOutput(
+    text: string,
+    submitSessionId: string,
+    requestId: string,
+    querySessionId: string,
+  ): AssistantOutput {
+    return createAssistantOutput(
+      text,
+      (content, hint) => {
+        const artifactUri = this.sessionStore.saveArtifact(content, `${hint}-${querySessionId}`);
+        this.sessionStore.appendHistoryEntry(submitSessionId, {
+          id: generateId(),
+          timestamp: new Date().toISOString(),
+          type: 'artifact_written',
+          submitSessionId,
+          requestId,
+          querySessionId,
+          details: {
+            artifactUri,
+            artifactType: 'assistant_response',
+          },
+        });
+        return artifactUri;
+      },
+      {
+        maxInlineLength: 1200,
+        artifactHint: 'assistant-response',
+      },
+    );
+  }
+
+  private maybePersistTraceArtifact(
+    submitSessionId: string,
+    requestId: string,
+    querySessionId: string,
+    modelTrace: QueryModelTrace,
+  ): string | undefined {
+    const serialized = JSON.stringify(modelTrace.contextTrace, null, 2);
+    if (serialized.length <= TRACE_ARTIFACT_THRESHOLD) {
+      return undefined;
+    }
+
+    const artifactUri = this.sessionStore.saveArtifact(serialized, `runtime-trace-${querySessionId}`);
+    this.sessionStore.appendHistoryEntry(submitSessionId, {
+      id: generateId(),
+      timestamp: new Date().toISOString(),
+      type: 'artifact_written',
+      submitSessionId,
+      requestId,
+      querySessionId,
+      details: {
+        artifactUri,
+        artifactType: 'context_trace',
+      },
+    });
+    return artifactUri;
+  }
+
+  private persistRunRecord(request: SubmitRequest, result: QueryRunResult): void {
+    try {
+      const modelTrace = result.modelTrace;
+      const sessionRecord: SessionRecord = {
+        id: result.session.id,
+        submitSessionId: request.sessionId,
+        requestId: request.id,
+        taskType: result.session.taskType,
+        state: result.session.state,
+        startedAt: result.session.startedAt,
+        endedAt: result.session.endedAt,
+        model: {
+          provider: modelTrace?.provider ?? 'mock',
+          model: modelTrace?.model ?? result.metrics.modelId ?? 'unknown-model',
+          usedMockFallback: modelTrace?.usedMockFallback ?? false,
+          fallbackReason: modelTrace?.fallbackReason,
+        },
+        context: {
+          contextStrategy: modelTrace?.contextStrategy,
+          usedKnowledgeIds: modelTrace?.usedKnowledgeIds ?? [],
+          usedSkillIds: modelTrace?.usedSkillIds ?? [],
+          usedRuleIds: modelTrace?.usedRuleIds ?? [],
+        },
+        errorCategory: result.error?.category,
+        errorCode: result.error?.code,
+        artifactUris: [result.assistantOutput?.artifactUri, result.traceArtifactUri]
+          .filter((value): value is string => Boolean(value)),
+      };
+
+      this.sessionStore.saveSessionRecord(sessionRecord);
+      this.sessionStore.appendHistoryEntry(request.sessionId, {
+        id: generateId(),
+        timestamp: new Date().toISOString(),
+        type: 'runtime_result',
+        submitSessionId: request.sessionId,
+        requestId: request.id,
+        querySessionId: result.session.id,
+        taskType: result.session.taskType,
+        state: result.session.state,
+        model: sessionRecord.model,
+        errorCategory: result.error?.category,
+        details: {
+          fallbackUsed: result.metrics.fallbackUsed ?? false,
+          modelCallMs: result.metrics.modelCallMs,
+          wallTimeMs: result.metrics.wallTimeMs,
+          toolExecutionMs: result.metrics.toolExecutionMs,
+          permissionDecisionCount: result.permissionDecisions.length,
+          toolResultCount: result.toolResults.length,
+          assistantArtifactUri: result.assistantOutput?.artifactUri,
+          traceArtifactUri: result.traceArtifactUri,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Persistence must not break the runtime result path.
+      console.warn(`[runtime] failed to persist session/history: ${message}`);
     }
   }
 }

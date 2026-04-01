@@ -1,7 +1,14 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
-export type DataLayer = 'knowledge' | 'skills' | 'rules' | 'permissions';
+export type DataLayer =
+  | 'knowledge'
+  | 'skills'
+  | 'rules'
+  | 'permissions'
+  | 'sessions'
+  | 'history'
+  | 'artifacts';
 
 const DEFAULT_DATA_ROOT = 'userclaw-data';
 

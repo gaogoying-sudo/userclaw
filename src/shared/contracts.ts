@@ -195,6 +195,10 @@ export interface ModelRouteDecision {
 // ---------------------------------------------------------------------------
 
 export type ErrorCategory =
+  | 'model_config_error'
+  | 'model_http_error'
+  | 'model_response_error'
+  | 'tool_validation_error'
   | 'validation_error'
   | 'permission_denied'
   | 'tool_error'
@@ -221,4 +225,5 @@ export interface SessionMetrics {
   toolExecutionMs: number;
   modelCallMs: number;
   modelId?: string;
+  fallbackUsed?: boolean;
 }

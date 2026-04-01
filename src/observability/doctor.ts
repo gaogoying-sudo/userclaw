@@ -4,9 +4,9 @@
  * Reports the health of core subsystems so operators can quickly
  * identify what layer is broken when something fails.
  *
- * Current status: checks tool count, knowledge/skill/rule counts,
- * permission rule presence, and model config readiness.
- * It does not perform live upstream connectivity probes.
+ * Current status: checks tool count, data root writability, runtime dirs,
+ * knowledge/skill/rule counts, permission rule presence, and model config readiness.
+ * It still does not perform live upstream connectivity probes.
  */
 
 import type { ToolRegistry } from '../tools/tool-registry.js';
@@ -15,6 +15,9 @@ import type { KnowledgeStore } from '../knowledge/knowledge-store.js';
 import type { SkillStore } from '../skills/skill-store.js';
 import type { RuleStore } from '../rules/rule-store.js';
 import { loadModelConfig } from '../models/model-config.js';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import type { SessionStore } from '../session/session-store.js';
 
 export interface DoctorCheckResult {
   name: string;
@@ -34,6 +37,7 @@ export interface DoctorDeps {
   knowledgeStore: KnowledgeStore;
   skillStore: SkillStore;
   ruleStore: RuleStore;
+  sessionStore: SessionStore;
 }
 
 export class Doctor {
@@ -46,6 +50,8 @@ export class Doctor {
   run(): DoctorReport {
     const checks: DoctorCheckResult[] = [
       this.checkTools(),
+      this.checkDataRootWritable(),
+      this.checkSessionHistoryDirs(),
       this.checkKnowledge(),
       this.checkSkills(),
       this.checkRules(),
@@ -104,6 +110,54 @@ export class Doctor {
     };
   }
 
+  private checkDataRootWritable(): DoctorCheckResult {
+    const dataRoot = this.deps.sessionStore.getDataRoot();
+    const probePath = path.join(dataRoot, `.doctor-write-probe-${Date.now()}.tmp`);
+
+    try {
+      writeFileSync(probePath, 'ok', 'utf8');
+      rmSync(probePath, { force: true });
+      return {
+        name: 'data_root_write',
+        status: 'ok',
+        detail: `Writable data root: ${dataRoot}`,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        name: 'data_root_write',
+        status: 'error',
+        detail: `Data root not writable (${dataRoot}): ${message}`,
+      };
+    }
+  }
+
+  private checkSessionHistoryDirs(): DoctorCheckResult {
+    const sessionDir = this.deps.sessionStore.getSessionDir();
+    const historyDir = this.deps.sessionStore.getHistoryDir();
+    const artifactDir = this.deps.sessionStore.getArtifactDir();
+
+    const missing = [
+      !existsSync(sessionDir) ? sessionDir : '',
+      !existsSync(historyDir) ? historyDir : '',
+      !existsSync(artifactDir) ? artifactDir : '',
+    ].filter(Boolean);
+
+    if (missing.length > 0) {
+      return {
+        name: 'session_history_dirs',
+        status: 'error',
+        detail: `Missing runtime dirs: ${missing.join(', ')}`,
+      };
+    }
+
+    return {
+      name: 'session_history_dirs',
+      status: 'ok',
+      detail: `sessions/history/artifacts dirs present`,
+    };
+  }
+
   private checkModelConfig(): DoctorCheckResult {
     const config = loadModelConfig();
     if (config.enabled && config.config) {
@@ -111,6 +165,14 @@ export class Doctor {
         name: 'model_config',
         status: 'ok',
         detail: `Real model enabled (${config.config.provider}:${config.config.modelName})`,
+      };
+    }
+
+    if ((config.reason ?? '').includes('Unsupported USERCLAW_MODEL_PROVIDER')) {
+      return {
+        name: 'model_config',
+        status: 'error',
+        detail: config.reason ?? 'Unsupported model provider',
       };
     }
 

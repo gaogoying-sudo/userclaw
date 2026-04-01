@@ -1,8 +1,9 @@
 /**
- * userclaw V1 Phase 3 Demo
+ * userclaw V1 Phase 4 Demo
  *
- * This script validates the first real usable loop:
- *   injection/load K/S/R -> runtime context assembly -> real model call (or explicit fallback) -> output.
+ * This script validates hardened runtime behavior:
+ *   injection/load K/S/R -> runtime context assembly -> real model call/fallback ->
+ *   unified trace/error output -> session/history/artifact persistence.
  *
  * Run: npm run demo
  */
@@ -19,6 +20,7 @@ import { SubmitEntry } from './submit/submit-entry.js';
 import { Doctor } from './observability/doctor.js';
 import { resolveDataRoot } from './shared/data-paths.js';
 import { loadModelConfig } from './models/model-config.js';
+import { SessionStore } from './session/session-store.js';
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -36,7 +38,7 @@ function printJson(label: string, obj: unknown): void {
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  separator('userclaw V1 Phase 3 First Usable Flow Demo');
+  separator('userclaw V1 Phase 4 Runtime Hardening Demo');
 
   const dataRoot = resolveDataRoot();
   const modelConfig = loadModelConfig();
@@ -45,6 +47,7 @@ async function main(): Promise<void> {
   const knowledgeStore = new KnowledgeStore({ dataRoot });
   const skillStore = new SkillStore({ dataRoot });
   const ruleStore = new RuleStore({ dataRoot });
+  const sessionStore = new SessionStore({ dataRoot });
   const toolRegistry = new ToolRegistry();
   registerCoreTools(toolRegistry);
 
@@ -67,8 +70,9 @@ async function main(): Promise<void> {
     knowledgeStore,
     skillStore,
     ruleStore,
+    sessionStore,
   });
-  const injectionEntry = new SubmitEntry(injectionRuntime);
+  const injectionEntry = new SubmitEntry(injectionRuntime, undefined, sessionStore);
 
   separator('Phase 0: Startup & Model Mode');
   console.log(`\n  Data root: ${dataRoot}`);
@@ -84,6 +88,9 @@ async function main(): Promise<void> {
   console.log(`    Rules:           ${ruleStore.count()}`);
   console.log(`    Tools:           ${toolRegistry.count()}`);
   console.log(`    Permission rules:${permissionEngine.listRules().length}`);
+  console.log(`    Sessions dir:    ${sessionStore.getSessionDir()}`);
+  console.log(`    History dir:     ${sessionStore.getHistoryDir()}`);
+  console.log(`    Artifacts dir:   ${sessionStore.getArtifactDir()}`);
 
   // ── Phase A: Guided Injection through unified Submit Entry ────────────
   separator('Phase A: Guided Injection via Unified Submit Entry');
@@ -163,8 +170,9 @@ async function main(): Promise<void> {
     knowledgeStore: reloadedKnowledgeStore,
     skillStore: reloadedSkillStore,
     ruleStore: reloadedRuleStore,
+    sessionStore,
   });
-  const entry = new SubmitEntry(runtime);
+  const entry = new SubmitEntry(runtime, undefined, sessionStore);
 
   // ── Phase C: Doctor Health Check ──────────────────────────────────────
   separator('Phase C: Doctor Health Check');
@@ -175,6 +183,7 @@ async function main(): Promise<void> {
     knowledgeStore: reloadedKnowledgeStore,
     skillStore: reloadedSkillStore,
     ruleStore: reloadedRuleStore,
+    sessionStore,
   });
   const report = doctor.run();
   printJson('Doctor Report', report);
@@ -190,7 +199,9 @@ async function main(): Promise<void> {
 
   printJson('Run Session', run.session);
   printJson('Run Assistant Response', run.assistantResponse);
+  printJson('Run Assistant Output', run.assistantOutput);
   printJson('Run Model Trace', run.modelTrace);
+  printJson('Run Trace Artifact', run.traceArtifactUri);
   printJson('Run Tool Results', run.toolResults);
   printJson('Run Permission Decisions', run.permissionDecisions);
   printJson('Run Metrics', run.metrics);
@@ -213,6 +224,8 @@ async function main(): Promise<void> {
     model path: ${run.modelTrace?.usedMockFallback ? 'mock fallback' : 'real model'}
     model id: ${run.modelTrace?.model ?? 'n/a'}
     provider: ${run.modelTrace?.provider ?? 'n/a'}
+    trace artifact: ${run.traceArtifactUri ?? '(inline)'}
+    assistant artifact: ${run.assistantOutput?.artifactUri ?? '(inline)'}
     context strategy: ${run.modelTrace?.contextStrategy ?? 'n/a'}
     used knowledge ids: ${(run.modelTrace?.usedKnowledgeIds ?? []).join(', ') || '(none)'}
     used skill ids: ${(run.modelTrace?.usedSkillIds ?? []).join(', ') || '(none)'}
@@ -224,6 +237,8 @@ async function main(): Promise<void> {
     [✓] Guided injection → knowledge/skill/rule deposit + local persistence
     [✓] Startup reload from local files (knowledge / skills / rules)
     [✓] Runtime context assembly (knowledge / skill / rule to model prompt)
+    [✓] Session/history persistence (per submit + per runtime result)
+    [✓] Artifact strategy for large assistant/trace payloads
     [✓] Real model path (if configured) with explicit fallback when config is missing
     [✓] Tool Registry & Tool Contract remain wired for follow-up tool-use evolution
     [✓] Permission Engine remains active (ask / allow / deny + scope + path rule + callback)
@@ -233,6 +248,21 @@ async function main(): Promise<void> {
     [✓] Doctor health check
     [✓] Metrics collection
   `);
+
+  printJson(
+    'Recent Session Records',
+    sessionStore.listSessionRecords(5).map((item) => ({
+      id: item.id,
+      submitSessionId: item.submitSessionId,
+      state: item.state,
+      taskType: item.taskType,
+      model: item.model,
+      errorCategory: item.errorCategory,
+    })),
+  );
+
+  printJson('Injection Session History', sessionStore.loadHistoryEntries(injectionEntry.getSessionId()));
+  printJson('Execution Session History', sessionStore.loadHistoryEntries(entry.getSessionId()));
 
   separator('Demo Complete');
 }
