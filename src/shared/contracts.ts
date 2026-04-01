@@ -170,6 +170,10 @@ export interface SkillItem {
   description: string;
   steps: string[];
   allowedTools?: string[];
+  source?: string;
+  adaptedFrom?: string;
+  whenToUse?: string;
+  isExternal?: boolean;
 }
 
 export interface RuleItem {

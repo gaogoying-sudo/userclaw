@@ -22,8 +22,21 @@ function buildFrontmatter(item: SkillItem): string {
     `description: ${escapeFrontmatter(item.description)}`,
   ];
 
+  if (item.isExternal) {
+    lines.push('origin: external');
+  }
+  if (item.source) {
+    lines.push(`source: ${escapeFrontmatter(item.source)}`);
+  }
+  if (item.adaptedFrom) {
+    lines.push(`adapted-from: ${escapeFrontmatter(item.adaptedFrom)}`);
+  }
+  if (item.whenToUse) {
+    lines.push(`when-to-use: ${escapeFrontmatter(item.whenToUse)}`);
+  }
+
   if (item.allowedTools && item.allowedTools.length > 0) {
-    lines.push('allowedTools:');
+    lines.push('allowed-tools:');
     for (const toolName of item.allowedTools) {
       lines.push(`  - ${escapeFrontmatter(toolName)}`);
     }

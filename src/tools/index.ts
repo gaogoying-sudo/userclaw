@@ -1,4 +1,5 @@
 import type { ToolSpec } from '../shared/contracts.js';
+import { registerExternalTools } from '../external/index.js';
 import { directoryListTool } from './directory-list.tool.js';
 import { fileReadTool } from './file-read.tool.js';
 import { fileWriteTool } from './file-write.tool.js';
@@ -15,5 +16,5 @@ export function registerCoreTools(registry: { register(spec: ToolSpec): void }):
   for (const tool of CORE_TOOLS) {
     registry.register(tool);
   }
+  registerExternalTools(registry);
 }
-

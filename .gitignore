@@ -9,6 +9,8 @@ userclaw-data/knowledge/*
 !userclaw-data/skills/
 userclaw-data/skills/*
 !userclaw-data/skills/.gitkeep
+!userclaw-data/skills/external-defect-triage.md
+!userclaw-data/skills/external-release-change-scan.md
 !userclaw-data/rules/
 userclaw-data/rules/*
 !userclaw-data/rules/.gitkeep

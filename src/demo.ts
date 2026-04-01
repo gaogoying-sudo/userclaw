@@ -1,9 +1,9 @@
 /**
- * userclaw V1 Phase 4 Demo
+ * userclaw V1 Phase 6 Demo
  *
- * This script validates hardened runtime behavior:
- *   injection/load K/S/R -> runtime context assembly -> real model call/fallback ->
- *   unified trace/error output -> session/history/artifact persistence.
+ * This script validates external capability onboarding behavior:
+ *   external skill load -> external tool adapter registration ->
+ *   runtime + permission + tool contract execution through the unified submit chain.
  *
  * Run: npm run demo
  */
@@ -24,6 +24,12 @@ import { Doctor } from './observability/doctor.js';
 import { resolveDataRoot } from './shared/data-paths.js';
 import { loadModelConfig } from './models/model-config.js';
 import { SessionStore } from './session/session-store.js';
+import {
+  listExternalSkillManifests,
+  listExternalToolManifests,
+  listLoadedExternalSkills,
+} from './external/index.js';
+import { ensureExternalSkillSamples } from './external/skills/external-skill-samples.js';
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -41,7 +47,7 @@ function printJson(label: string, obj: unknown): void {
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  separator('userclaw V1 Phase 5 Minimal Interaction & Permission Confirmation Demo');
+  separator('userclaw V1 Phase 6 External Capability Onboarding Demo');
 
   const dataRoot = resolveDataRoot();
   const modelConfig = loadModelConfig();
@@ -52,8 +58,13 @@ async function main(): Promise<void> {
   const skillStore = new SkillStore({ dataRoot });
   const ruleStore = new RuleStore({ dataRoot });
   const sessionStore = new SessionStore({ dataRoot });
+  ensureExternalSkillSamples(skillStore.getStorageDir());
+  skillStore.reloadFromDisk();
+
   const toolRegistry = new ToolRegistry();
   registerCoreTools(toolRegistry);
+  const externalToolManifests = listExternalToolManifests();
+  const externalSkillManifests = listExternalSkillManifests();
 
   const permissionEngine = new PermissionEngine({
     dataRoot,
@@ -69,6 +80,11 @@ async function main(): Promise<void> {
           decision: 'deny',
           scope: 'once',
           reason: 'Demo scripted user choice: deny once',
+        },
+        {
+          decision: 'allow',
+          scope: 'once',
+          reason: 'Demo scripted user choice: allow once for external command',
         },
       ]),
   });
@@ -104,11 +120,26 @@ async function main(): Promise<void> {
   console.log(`    Skills:          ${skillStore.count()}`);
   console.log(`    Rules:           ${ruleStore.count()}`);
   console.log(`    Tools:           ${toolRegistry.count()}`);
+  console.log(`    External tools:  ${externalToolManifests.length}`);
+  console.log(`    External skills: ${listLoadedExternalSkills(skillStore.listAll()).length}`);
   console.log(`    Permission rules:${permissionEngine.listRules().length}`);
   console.log(`    Permission mode: ${interactivePermission ? 'interactive-cli' : 'scripted-demo'}`);
   console.log(`    Sessions dir:    ${sessionStore.getSessionDir()}`);
   console.log(`    History dir:     ${sessionStore.getHistoryDir()}`);
   console.log(`    Artifacts dir:   ${sessionStore.getArtifactDir()}`);
+  printJson('External Tool Manifests', externalToolManifests);
+  printJson('External Skill Manifests', externalSkillManifests);
+  printJson(
+    'Loaded External Skills',
+    listLoadedExternalSkills(skillStore.listAll()).map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      source: skill.source,
+      adaptedFrom: skill.adaptedFrom,
+      allowedTools: skill.allowedTools,
+      whenToUse: skill.whenToUse,
+    })),
+  );
 
   // ── Phase A: Guided Injection through unified Submit Entry ────────────
   separator('Phase A: Guided Injection via Unified Submit Entry');
@@ -289,8 +320,63 @@ async function main(): Promise<void> {
     printJson('Run 3 Error', run3.error);
   }
 
-  // ── Phase G: Closure Summary ──────────────────────────────────────────
-  separator('Phase G: Closure Summary');
+  // ── Phase G: External Tool Run (read-only adapter) ────────────────────
+  separator('Phase G: External Tool Run 1 (external_repo_search)');
+
+  const run4 = await entry.submit(
+    'Run external repository search adapter for runtime keyword',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'external_repo_search',
+            input: {
+              query: 'QueryRuntime',
+              path: 'src/runtime',
+              maxResults: 8,
+            },
+          },
+        ],
+      },
+    },
+  );
+
+  printJson('Run 4 Session', run4.session);
+  printJson('Run 4 Tool Results', run4.toolResults);
+  printJson('Run 4 Permission Decisions', run4.permissionDecisions);
+  if (run4.error) {
+    printJson('Run 4 Error', run4.error);
+  }
+
+  // ── Phase H: External Tool Run (permission-gated adapter) ─────────────
+  separator('Phase H: External Tool Run 2 (external_git_status ask -> allow)');
+
+  const run5 = await entry.submit(
+    'Run external git status adapter with explicit confirmation path',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'external_git_status',
+            input: {
+              includeUntracked: false,
+              maxLines: 20,
+            },
+          },
+        ],
+      },
+    },
+  );
+
+  printJson('Run 5 Session', run5.session);
+  printJson('Run 5 Tool Results', run5.toolResults);
+  printJson('Run 5 Permission Decisions', run5.permissionDecisions);
+  if (run5.error) {
+    printJson('Run 5 Error', run5.error);
+  }
+
+  // ── Phase I: Closure Summary ──────────────────────────────────────────
+  separator('Phase I: Closure Summary');
 
   console.log(`
   Injection chain (Phase A):
@@ -313,11 +399,26 @@ async function main(): Promise<void> {
     deny source: ${run3.permissionDecisions.find((item) => item.decision === 'deny')?.source ?? 'n/a'}
     error category: ${run3.error?.category ?? 'n/a'}
 
+  Execution run 4 (Phase G):
+    state: ${run4.session.state}
+    external tool: external_repo_search
+    tool result ok: ${run4.toolResults[0]?.ok ?? false}
+    permission decisions: ${run4.permissionDecisions.length}
+
+  Execution run 5 (Phase H):
+    state: ${run5.session.state}
+    external tool: external_git_status
+    ask source: ${run5.permissionDecisions.find((item) => item.source === 'tool_check')?.source ?? 'n/a'}
+    callback decision: ${run5.permissionDecisions.find((item) => item.source === 'callback')?.decision ?? 'n/a'}
+
   Layers exercised:
     [✓] Unified Submit Entry (both injection and execution)
     [✓] Query Runtime with explicit state machine
     [✓] Minimal permission confirmation interaction callback
     [✓] ask -> allow(session) -> session reuse -> deny path
+    [✓] External tool adapters registered via manifest-backed onboarding
+    [✓] External skill markdowns loaded via skill layer (frontmatter metadata retained)
+    [✓] External capability still goes through submit/runtime/tool contract and permission
     [✓] Guided injection → knowledge/skill/rule deposit + local persistence
     [✓] Startup reload from local files (knowledge / skills / rules)
     [✓] Runtime context assembly (knowledge / skill / rule to model prompt)
