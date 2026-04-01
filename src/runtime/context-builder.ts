@@ -5,6 +5,7 @@ import type {
   SkillItem,
   SubmitRequest,
 } from '../shared/contracts.js';
+import { buildContextTrace, type RuntimeContextTrace } from './runtime-trace.js';
 
 export interface ModelContextBuildInput {
   request: SubmitRequest;
@@ -21,6 +22,7 @@ export interface ModelContextBuildResult {
   usedKnowledge: KnowledgeItem[];
   usedSkills: SkillItem[];
   usedRules: RuleItem[];
+  contextTrace: RuntimeContextTrace;
 }
 
 function compact(text: string, maxLength: number): string {
@@ -40,6 +42,22 @@ function extractKeywords(goal: string): string[] {
 
   const all = [lowerGoal, ...englishTokens, ...chineseParts.map((part) => part.toLowerCase())];
   return Array.from(new Set(all)).slice(0, 20);
+}
+
+function buildSystemPrompt(systemContext: RuntimeContext['systemContext']): string {
+  return [
+    `You are ${systemContext.identity}.`,
+    'Follow system principles and high-priority rules strictly.',
+    'Provide concise, actionable output grounded in provided context.',
+    'If context is insufficient, say what is missing instead of guessing.',
+    '',
+    'System principles:',
+    ...systemContext.principles.map((principle) => `- ${principle}`),
+  ].join('\n');
+}
+
+function buildTaskSection(goal: string): string {
+  return `Task Goal:\n${goal}`;
 }
 
 function scoreText(text: string, keywords: string[]): number {
@@ -160,18 +178,10 @@ export function buildRuntimeModelContext(input: ModelContextBuildInput): ModelCo
   const contextStrategy =
     'knowledge: top relevant <=3 (fallback recent); skills: top relevant <=2 (fallback recent); rules: relevant + highest priority <=4';
 
-  const systemPrompt = [
-    `You are ${input.runtimeContext.systemContext.identity}.`,
-    'Follow system principles and high-priority rules strictly.',
-    'Provide concise, actionable output grounded in provided context.',
-    'If context is insufficient, say what is missing instead of guessing.',
-    '',
-    'System principles:',
-    ...input.runtimeContext.systemContext.principles.map((principle) => `- ${principle}`),
-  ].join('\n');
+  const systemPrompt = buildSystemPrompt(input.runtimeContext.systemContext);
 
   const userPrompt = [
-    `Task Goal:\n${goal}`,
+    buildTaskSection(goal),
     '',
     `Context strategy:\n${contextStrategy}`,
     '',
@@ -187,6 +197,20 @@ export function buildRuntimeModelContext(input: ModelContextBuildInput): ModelCo
     '3) Final answer',
   ].join('\n');
 
+  const contextTrace = buildContextTrace({
+    systemContext: input.runtimeContext.systemContext,
+    taskContext: {
+      goal,
+      currentPlan: input.runtimeContext.taskContext.currentPlan,
+      recentActions: input.runtimeContext.taskContext.recentActions,
+    },
+    keywords,
+    usedKnowledge,
+    usedSkills,
+    usedRules,
+    contextStrategy,
+  });
+
   return {
     systemPrompt,
     userPrompt,
@@ -194,6 +218,6 @@ export function buildRuntimeModelContext(input: ModelContextBuildInput): ModelCo
     usedKnowledge,
     usedSkills,
     usedRules,
+    contextTrace,
   };
 }
-

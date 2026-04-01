@@ -13,6 +13,7 @@ export class MetricsCollector {
   private modelCallMs = 0;
   private wallTimeMs = 0;
   private modelId = 'mock-model-v1';
+  private fallbackUsed = false;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -29,6 +30,10 @@ export class MetricsCollector {
     }
   }
 
+  recordFallbackUsed(fallbackUsed: boolean): void {
+    this.fallbackUsed = fallbackUsed;
+  }
+
   recordEnd(totalMs: number): void {
     this.wallTimeMs = totalMs;
   }
@@ -41,6 +46,7 @@ export class MetricsCollector {
       toolExecutionMs: this.toolExecMs,
       modelCallMs: this.modelCallMs,
       modelId: this.modelId,
+      fallbackUsed: this.fallbackUsed,
     };
   }
 }

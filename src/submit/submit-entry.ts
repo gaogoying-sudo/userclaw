@@ -12,14 +12,14 @@
  *  - Build SubmitRequest
  *  - Dispatch to QueryRuntime
  *
- * Placeholder status: validation is minimal; history recording is a stub.
- * Phase 2 (Codex) will add history persistence, queue handling,
- * abort-controller creation, attachment expansion, and slash-command routing.
+ * Current status: validation remains minimal, but submit-level history
+ * is persisted through SessionStore for runtime hardening.
  */
 
 import type { SubmitRequest, SubmitSource, TriggerMode } from '../shared/contracts.js';
 import type { QueryRuntime, QueryRunResult } from '../runtime/query-runtime.js';
 import { generateId } from '../shared/id.js';
+import { SessionStore } from '../session/session-store.js';
 
 export interface SubmitOptions {
   source?: SubmitSource;
@@ -30,10 +30,12 @@ export interface SubmitOptions {
 export class SubmitEntry {
   private runtime: QueryRuntime;
   private sessionId: string;
+  private sessionStore: SessionStore;
 
-  constructor(runtime: QueryRuntime, sessionId?: string) {
+  constructor(runtime: QueryRuntime, sessionId?: string, sessionStore?: SessionStore) {
     this.runtime = runtime;
     this.sessionId = sessionId ?? generateId();
+    this.sessionStore = sessionStore ?? new SessionStore();
   }
 
   async submit(inputText: string, options: SubmitOptions = {}): Promise<QueryRunResult> {
@@ -49,11 +51,13 @@ export class SubmitEntry {
       createdAt: new Date().toISOString(),
     };
 
-    // Placeholder: history recording stub.
-    // Phase 2 (Codex) will persist to a session history store.
     this.recordHistory(request);
 
     return this.runtime.execute(request);
+  }
+
+  getSessionId(): string {
+    return this.sessionId;
   }
 
   private validateInput(inputText: string, _options: SubmitOptions): void {
@@ -62,11 +66,18 @@ export class SubmitEntry {
     }
   }
 
-  /**
-   * Stub: record to session history.
-   * Phase 2 will implement real persistence.
-   */
-  private recordHistory(_request: SubmitRequest): void {
-    // no-op in V1 skeleton
+  private recordHistory(request: SubmitRequest): void {
+    this.sessionStore.appendHistoryEntry(this.sessionId, {
+      id: generateId(),
+      timestamp: request.createdAt,
+      type: 'submit_request',
+      submitSessionId: this.sessionId,
+      requestId: request.id,
+      details: {
+        source: request.source,
+        triggerMode: request.triggerMode,
+        inputPreview: (request.inputText ?? '').slice(0, 160),
+      },
+    });
   }
 }
