@@ -49,6 +49,7 @@ function buildSystemPrompt(systemContext: RuntimeContext['systemContext']): stri
     `You are ${systemContext.identity}.`,
     'Follow system principles and high-priority rules strictly.',
     'Provide concise, actionable output grounded in provided context.',
+    'Default output language: Simplified Chinese unless the user explicitly requests another language.',
     'If context is insufficient, say what is missing instead of guessing.',
     '',
     'System principles:',

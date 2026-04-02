@@ -34,6 +34,9 @@ export interface QueryModelTrace {
   model: string;
   usedMockFallback: boolean;
   fallbackReason?: string;
+  retryCount?: number;
+  lastFailureCode?: string;
+  lastFailureMessage?: string;
   contextStrategy: string;
   usedKnowledgeIds: string[];
   usedSkillIds: string[];

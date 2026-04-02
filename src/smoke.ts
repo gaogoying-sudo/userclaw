@@ -12,6 +12,7 @@ import { SubmitEntry } from './submit/submit-entry.js';
 import { SessionStore } from './session/session-store.js';
 import { listExternalToolManifests, listLoadedExternalSkills } from './external/index.js';
 import { ensureExternalSkillSamples } from './external/skills/external-skill-samples.js';
+import { callModel } from './models/model-client.js';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -247,6 +248,31 @@ async function main(): Promise<void> {
   const sessionFileCount = readdirSync(sessionStore.getSessionDir()).length;
   assert(sessionFileCount > 0, 'at least one session record file should exist');
 
+  const retryProbe = await callModel(
+    {
+      systemPrompt: 'You are a test runtime.',
+      userPrompt: 'Ping',
+    },
+    {
+      enabled: true,
+      config: {
+        provider: 'openai_compatible',
+        baseUrl: 'http://127.0.0.1:1/v1',
+        modelName: 'probe-model',
+        apiKey: 'probe-key',
+        timeoutMs: 800,
+      },
+    },
+  );
+  assert(!retryProbe.ok, 'retry probe should fail against unreachable endpoint');
+  if (!retryProbe.ok) {
+    assert(
+      ['MODEL_TIMEOUT', 'MODEL_CONNECT_ERROR', 'MODEL_NETWORK_ERROR'].includes(retryProbe.code),
+      'retry probe should expose refined network/timeout error code',
+    );
+    assert(retryProbe.retryCount === 1, 'retry probe should auto-retry once');
+  }
+
   console.log('[smoke] PASS');
   console.log(`[smoke] dataRoot=${dataRoot}`);
   console.log(`[smoke] sessionRecords=${recent.length}`);
@@ -257,6 +283,8 @@ async function main(): Promise<void> {
   console.log(`[smoke] externalSkillInContext=${runExternalSkillContext.modelTrace.usedSkillIds.includes('external-defect-triage')}`);
   console.log(`[smoke] externalSkillsLoaded=${listLoadedExternalSkills(skillStore.listAll()).length}`);
   console.log(`[smoke] externalToolRegistered=${toolRegistry.has('external_repo_search') && toolRegistry.has('external_git_status')}`);
+  console.log(`[smoke] modelRetryRefinedCode=${!retryProbe.ok ? retryProbe.code : 'unexpected_success'}`);
+  console.log(`[smoke] modelRetryCount=${!retryProbe.ok ? retryProbe.retryCount : -1}`);
 }
 
 main().catch((err) => {

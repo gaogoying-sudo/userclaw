@@ -34,14 +34,20 @@ export interface ModelCallSuccess {
   modelName: string;
   text: string;
   usage?: ModelUsage;
+  retryCount: number;
 }
 
 export type ModelCallErrorCode =
   | 'MODEL_CONFIG_MISSING'
   | 'MODEL_API_KEY_MISSING'
-  | 'MODEL_HTTP_ERROR'
+  | 'MODEL_TIMEOUT'
+  | 'MODEL_CONNECT_ERROR'
+  | 'MODEL_HTTP_401'
+  | 'MODEL_HTTP_403'
+  | 'MODEL_HTTP_429'
+  | 'MODEL_HTTP_5XX'
   | 'MODEL_NETWORK_ERROR'
-  | 'MODEL_RESPONSE_INVALID';
+  | 'MODEL_RESPONSE_PARSE_ERROR';
 
 export interface ModelCallFailure {
   ok: false;
@@ -50,8 +56,9 @@ export interface ModelCallFailure {
   code: ModelCallErrorCode;
   message: string;
   retryable: boolean;
+  retryCount: number;
+  nextAction: string;
   statusCode?: number;
 }
 
 export type ModelCallResult = ModelCallSuccess | ModelCallFailure;
-

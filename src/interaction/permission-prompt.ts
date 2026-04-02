@@ -6,10 +6,10 @@ import type {
 import type { PermissionDecisionContext } from '../permissions/permission-types.js';
 
 const DEFAULT_OPTIONS = [
-  { key: '1', decision: 'allow', scope: 'once', label: 'Allow once' },
-  { key: '2', decision: 'allow', scope: 'session', label: 'Allow for session' },
-  { key: '3', decision: 'allow', scope: 'project', label: 'Allow for project' },
-  { key: '4', decision: 'deny', scope: undefined, label: 'Deny' },
+  { key: '1', decision: 'allow', scope: 'once', label: '仅本次允许' },
+  { key: '2', decision: 'allow', scope: 'session', label: '本会话允许' },
+  { key: '3', decision: 'allow', scope: 'project', label: '项目级允许' },
+  { key: '4', decision: 'deny', scope: undefined, label: '拒绝' },
 ] as const;
 
 type PromptOption = (typeof DEFAULT_OPTIONS)[number];
@@ -56,18 +56,18 @@ export async function promptPermissionDecision(
   const view = buildPermissionPromptViewModel(context);
 
   io.writeLine('');
-  io.writeLine('--- Permission Confirmation ---');
-  io.writeLine(`Tool: ${view.toolName}`);
-  io.writeLine(`Reason: ${view.reason ?? '(none)'}`);
-  io.writeLine(`Target: ${view.targetPath ?? '(none)'}`);
-  io.writeLine(`Destructive: ${view.isDestructive ? 'yes' : 'no'}`);
-  io.writeLine('Options:');
+  io.writeLine('--- 权限确认 ---');
+  io.writeLine(`工具：${view.toolName}`);
+  io.writeLine(`原因：${view.reason ?? '（无）'}`);
+  io.writeLine(`目标：${view.targetPath ?? '（无）'}`);
+  io.writeLine(`是否高风险：${view.isDestructive ? '是' : '否'}`);
+  io.writeLine('可选操作：');
   for (const option of view.options) {
     io.writeLine(`  [${option.key}] ${option.label}`);
   }
-  io.writeLine(`Default: [${view.defaultOptionKey}]`);
+  io.writeLine(`默认： [${view.defaultOptionKey}]`);
 
-  const rawInput = await io.readLine('Select permission decision: ');
+  const rawInput = await io.readLine('请选择权限决策：');
   const selected = resolveOption(view, rawInput);
 
   return {
@@ -76,11 +76,10 @@ export async function promptPermissionDecision(
       scope: selected.scope,
       reason:
         selected.decision === 'deny'
-          ? `Denied by user via terminal for tool "${view.toolName}"`
-          : `Approved by user via terminal (${selected.scope ?? 'once'}) for tool "${view.toolName}"`,
+          ? `用户在终端拒绝了工具 "${view.toolName}" 的调用`
+          : `用户在终端批准了工具 "${view.toolName}"（scope=${selected.scope ?? 'once'}）`,
     },
     selectedOption: selected,
     inputRaw: rawInput,
   };
 }
-
