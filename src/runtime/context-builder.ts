@@ -154,7 +154,10 @@ function buildSkillSection(items: SkillItem[]): string {
     const toolHint = item.allowedTools && item.allowedTools.length > 0
       ? ` Allowed tools: ${item.allowedTools.join(', ')}.`
       : '';
-    return `- [${item.id}] ${compact(item.name, 80)} | ${compact(item.description, 140)} | Steps: ${steps}.${toolHint}`;
+    const originHint = item.isExternal
+      ? ` Source: ${compact(item.source ?? 'external', 60)}.`
+      : '';
+    return `- [${item.id}] ${compact(item.name, 80)} | ${compact(item.description, 140)} | Steps: ${steps}.${toolHint}${originHint}`;
   }).join('\n');
 }
 

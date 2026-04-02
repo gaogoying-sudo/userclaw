@@ -10,6 +10,8 @@ import { RuleStore } from './rules/rule-store.js';
 import { QueryRuntime } from './runtime/query-runtime.js';
 import { SubmitEntry } from './submit/submit-entry.js';
 import { SessionStore } from './session/session-store.js';
+import { listExternalToolManifests, listLoadedExternalSkills } from './external/index.js';
+import { ensureExternalSkillSamples } from './external/skills/external-skill-samples.js';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -19,6 +21,7 @@ function assert(condition: unknown, message: string): asserts condition {
 
 async function main(): Promise<void> {
   const dataRoot = path.join('/tmp', `userclaw-smoke-${Date.now()}`);
+  ensureExternalSkillSamples(path.join(dataRoot, 'skills'));
 
   const knowledgeStore = new KnowledgeStore({ dataRoot });
   const skillStore = new SkillStore({ dataRoot });
@@ -40,6 +43,11 @@ async function main(): Promise<void> {
         scope: 'once',
         reason: 'smoke scripted deny once',
       },
+      {
+        decision: 'allow',
+        scope: 'once',
+        reason: 'smoke scripted allow once for external command',
+      },
     ]),
   });
 
@@ -52,6 +60,23 @@ async function main(): Promise<void> {
     sessionStore,
   });
   const entry = new SubmitEntry(runtime, undefined, sessionStore);
+
+  assert(toolRegistry.has('external_repo_search'), 'external_repo_search should be registered');
+  assert(toolRegistry.has('external_git_status'), 'external_git_status should be registered');
+  assert(listExternalToolManifests().length >= 2, 'external tool manifests should be loaded');
+  assert(
+    listLoadedExternalSkills(skillStore.listAll()).length >= 2,
+    'external skills should be loaded from frontmatter markdown',
+  );
+
+  const runExternalSkillContext = await entry.submit(
+    'Use external-defect-triage skill to suggest bug investigation steps',
+  );
+  assert(runExternalSkillContext.modelTrace, 'external skill context run should include modelTrace');
+  assert(
+    runExternalSkillContext.modelTrace.usedSkillIds.includes('external-defect-triage'),
+    'external skill should participate in runtime context assembly',
+  );
 
   await entry.submit('Seed smoke context', {
     source: 'guided_injection',
@@ -154,6 +179,61 @@ async function main(): Promise<void> {
     'project scope reuse should be resolved by project rule',
   );
 
+  const runExternalSearch = await entry.submit(
+    'Smoke external repo search through adapter and tool contract',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'external_repo_search',
+            input: {
+              query: 'QueryRuntime',
+              path: 'src/runtime',
+              maxResults: 5,
+            },
+          },
+        ],
+      },
+    },
+  );
+  assert(runExternalSearch.session.state === 'completed', 'external repo search run should complete');
+  assert(runExternalSearch.toolResults[0]?.ok === true, 'external repo search should return success');
+  assert(
+    runExternalSearch.permissionDecisions.some((decision) => decision.toolName === 'external_repo_search'),
+    'external repo search should still be recorded in permission/runtime chain',
+  );
+
+  const runExternalGitStatus = await entry.submit(
+    'Smoke external git status through permission callback',
+    {
+      structuredPayload: {
+        toolCalls: [
+          {
+            toolName: 'external_git_status',
+            input: {
+              includeUntracked: false,
+              maxLines: 10,
+            },
+          },
+        ],
+      },
+    },
+  );
+  assert(runExternalGitStatus.session.state === 'completed', 'external git status run should complete');
+  assert(runExternalGitStatus.toolResults[0]?.ok === true, 'external git status should return success');
+  assert(
+    runExternalGitStatus.permissionDecisions.some(
+      (decision) => decision.toolName === 'external_git_status' && decision.source === 'tool_check' && decision.decision === 'ask',
+    ),
+    'external git status should trigger ask through tool_check',
+  );
+  assert(
+    runExternalGitStatus.permissionDecisions.some(
+      (decision) => decision.toolName === 'external_git_status' && decision.source === 'callback' && decision.decision === 'allow',
+    ),
+    'external git status should be allowed by callback decision',
+  );
+
   const recent = sessionStore.listSessionRecords(10);
   assert(recent.length >= 2, 'session records should be persisted');
 
@@ -174,6 +254,9 @@ async function main(): Promise<void> {
   console.log(`[smoke] model=${runAllowProject.modelTrace.model} fallback=${runAllowProject.modelTrace.usedMockFallback}`);
   console.log(`[smoke] projectScopeReuse=${runProjectReuse.permissionDecisions.some((d) => d.source === 'rule:project')}`);
   console.log(`[smoke] denyConfirmed=${runDeny.permissionDecisions.some((d) => d.decision === 'deny')}`);
+  console.log(`[smoke] externalSkillInContext=${runExternalSkillContext.modelTrace.usedSkillIds.includes('external-defect-triage')}`);
+  console.log(`[smoke] externalSkillsLoaded=${listLoadedExternalSkills(skillStore.listAll()).length}`);
+  console.log(`[smoke] externalToolRegistered=${toolRegistry.has('external_repo_search') && toolRegistry.has('external_git_status')}`);
 }
 
 main().catch((err) => {

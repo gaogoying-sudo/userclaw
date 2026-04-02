@@ -7,6 +7,46 @@ interface FrontmatterParseResult {
   body: string;
 }
 
+function getStringValue(
+  frontmatter: Record<string, string | string[]>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = frontmatter[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function getArrayValue(
+  frontmatter: Record<string, string | string[]>,
+  keys: string[],
+): string[] | undefined {
+  for (const key of keys) {
+    const value = frontmatter[key];
+    if (Array.isArray(value)) {
+      const normalized = value.map((item) => item.trim()).filter((item) => item.length > 0);
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    }
+
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const normalized = value
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function parseFrontmatter(markdown: string): FrontmatterParseResult {
   if (!markdown.startsWith('---\n')) {
     return { frontmatter: {}, body: markdown };
@@ -26,7 +66,7 @@ function parseFrontmatter(markdown: string): FrontmatterParseResult {
   let currentKey: string | null = null;
 
   for (const line of lines) {
-    const keyValueMatch = line.match(/^([a-zA-Z0-9_]+):\s*(.*)$/);
+    const keyValueMatch = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/);
     if (keyValueMatch) {
       const [, key, value] = keyValueMatch;
       if (value.length > 0) {
@@ -72,22 +112,19 @@ function parseSteps(markdownBody: string): string[] {
 function toSkillItem(filePath: string, markdown: string): SkillItem | null {
   const { frontmatter, body } = parseFrontmatter(markdown);
 
-  const id = typeof frontmatter.id === 'string'
-    ? frontmatter.id
-    : path.basename(filePath, path.extname(filePath));
-  const name = typeof frontmatter.name === 'string' ? frontmatter.name : id;
-  const description = typeof frontmatter.description === 'string' ? frontmatter.description : '';
+  const id = getStringValue(frontmatter, ['id'])
+    ?? path.basename(filePath, path.extname(filePath));
+  const name = getStringValue(frontmatter, ['name']) ?? id;
+  const description = getStringValue(frontmatter, ['description']) ?? '';
+  const source = getStringValue(frontmatter, ['source']);
+  const adaptedFrom = getStringValue(frontmatter, ['adapted-from', 'adaptedFrom']);
+  const whenToUse = getStringValue(frontmatter, ['when-to-use', 'whenToUse']);
+  const origin = getStringValue(frontmatter, ['origin', 'capability-origin']);
+  const isExternal = origin?.toLowerCase() === 'external'
+    || Boolean(adaptedFrom)
+    || (typeof source === 'string' && source.toLowerCase() !== 'internal');
 
-  const allowedToolsValue = frontmatter.allowedTools;
-  let allowedTools: string[] | undefined;
-  if (Array.isArray(allowedToolsValue)) {
-    allowedTools = allowedToolsValue;
-  } else if (typeof allowedToolsValue === 'string' && allowedToolsValue.trim().length > 0) {
-    allowedTools = allowedToolsValue
-      .split(',')
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-  }
+  const allowedTools = getArrayValue(frontmatter, ['allowed-tools', 'allowedTools']);
 
   const steps = parseSteps(body);
   if (steps.length === 0) {
@@ -100,6 +137,10 @@ function toSkillItem(filePath: string, markdown: string): SkillItem | null {
     description,
     steps,
     allowedTools,
+    source,
+    adaptedFrom,
+    whenToUse,
+    isExternal,
   };
 }
 
