@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { promptPermissionDecision } from '../interaction/permission-prompt.js';
 import type { ScriptedPermissionAction } from '../interaction/interaction-types.js';
+import { withLocalTimestamp } from '../shared/local-time.js';
 
 export function createAutoApprovePermissionCallback(
   scope: PermissionScope = 'once',
@@ -42,10 +43,10 @@ export function createCliPermissionCallback(): PermissionRequestCallback {
     try {
       const result = await promptPermissionDecision(context, {
         writeLine(message: string): void {
-          output.write(`${message}\n`);
+          output.write(`${withLocalTimestamp(message)}\n`);
         },
         async readLine(promptText: string): Promise<string> {
-          return rl.question(promptText);
+          return rl.question(withLocalTimestamp(promptText));
         },
       });
       return result.decision;

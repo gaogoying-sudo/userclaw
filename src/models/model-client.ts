@@ -20,6 +20,12 @@ interface OpenAICompatibleResponse {
   };
 }
 
+const RETRY_DELAY_MS = 350;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function failure(
   overrides: Omit<ModelCallFailure, 'ok' | 'provider'> & { provider?: ModelCallFailure['provider'] },
 ): ModelCallFailure {
@@ -34,6 +40,7 @@ function mapUsage(usage: OpenAICompatibleResponse['usage']): ModelUsage | undefi
   if (!usage) {
     return undefined;
   }
+
   return {
     promptTokens: usage.prompt_tokens,
     completionTokens: usage.completion_tokens,
@@ -45,12 +52,144 @@ function parseResponseBody(body: unknown): OpenAICompatibleResponse | null {
   if (!body || typeof body !== 'object') {
     return null;
   }
+
   return body as OpenAICompatibleResponse;
 }
 
-export async function callModel(
+function normalizeErrorMessage(value: string, maxLength = 260): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxLength - 3)}...`;
+}
+
+function mapHttpFailure(
+  statusCode: number,
+  modelName: string,
+  bodyText: string,
+  retryCount: number,
+): ModelCallFailure {
+  const bodyHint = bodyText ? `: ${normalizeErrorMessage(bodyText)}` : '';
+
+  if (statusCode === 401) {
+    return failure({
+      code: 'MODEL_HTTP_401',
+      modelName,
+      statusCode,
+      retryable: false,
+      retryCount,
+      message: `模型请求失败：401 鉴权失败${bodyHint}`,
+      nextAction: '请检查 USERCLAW_MODEL_API_KEY 是否有效。',
+    });
+  }
+
+  if (statusCode === 403) {
+    return failure({
+      code: 'MODEL_HTTP_403',
+      modelName,
+      statusCode,
+      retryable: false,
+      retryCount,
+      message: `模型请求失败：403 无权限访问${bodyHint}`,
+      nextAction: '请检查模型服务权限、组织策略或密钥权限范围。',
+    });
+  }
+
+  if (statusCode === 429) {
+    return failure({
+      code: 'MODEL_HTTP_429',
+      modelName,
+      statusCode,
+      retryable: true,
+      retryCount,
+      message: `模型请求失败：429 请求过于频繁${bodyHint}`,
+      nextAction: '请稍后重试，或降低请求频率。',
+    });
+  }
+
+  if (statusCode >= 500 && statusCode <= 599) {
+    return failure({
+      code: 'MODEL_HTTP_5XX',
+      modelName,
+      statusCode,
+      retryable: true,
+      retryCount,
+      message: `模型请求失败：${statusCode} 服务端错误${bodyHint}`,
+      nextAction: '服务端可能临时异常，请稍后重试。',
+    });
+  }
+
+  return failure({
+    code: 'MODEL_NETWORK_ERROR',
+    modelName,
+    statusCode,
+    retryable: false,
+    retryCount,
+    message: `模型请求失败：HTTP ${statusCode}${bodyHint}`,
+    nextAction: '请检查模型服务地址、鉴权参数与网络连通性。',
+  });
+}
+
+function extractNodeErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === 'string') {
+    return direct;
+  }
+
+  const cause = (error as { cause?: { code?: unknown } }).cause;
+  if (cause && typeof cause.code === 'string') {
+    return cause.code;
+  }
+
+  return undefined;
+}
+
+function mapNetworkFailure(error: unknown, modelName: string, retryCount: number): ModelCallFailure {
+  const message = error instanceof Error ? error.message : String(error);
+  const errorCode = extractNodeErrorCode(error);
+
+  if (error instanceof Error && error.name === 'AbortError') {
+    return failure({
+      code: 'MODEL_TIMEOUT',
+      modelName,
+      retryable: true,
+      retryCount,
+      message: '模型请求失败：请求超时',
+      nextAction: '请稍后重试，或提高 USERCLAW_MODEL_TIMEOUT_MS。',
+    });
+  }
+
+  if (errorCode && ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT'].includes(errorCode)) {
+    return failure({
+      code: 'MODEL_CONNECT_ERROR',
+      modelName,
+      retryable: true,
+      retryCount,
+      message: `模型请求失败：网络连接异常 (${errorCode})`,
+      nextAction: '请检查模型服务可达性、base URL 和本机网络。',
+    });
+  }
+
+  return failure({
+    code: 'MODEL_NETWORK_ERROR',
+    modelName,
+    retryable: true,
+    retryCount,
+    message: `模型请求失败：网络异常 (${normalizeErrorMessage(message)})`,
+    nextAction: '请检查当前网络或模型服务状态。',
+  });
+}
+
+async function callModelOnce(
   input: ModelCallInput,
-  configState: ModelConfigState = loadModelConfig(),
+  configState: ModelConfigState,
+  retryCount: number,
 ): Promise<ModelCallResult> {
   if (!configState.enabled || !configState.config) {
     const missing = configState.missingEnv ?? [];
@@ -60,8 +199,10 @@ export async function callModel(
 
     return failure({
       code,
-      message: configState.reason ?? 'Model configuration is incomplete',
+      message: configState.reason ?? '模型配置不完整',
       retryable: false,
+      retryCount,
+      nextAction: '请先补全模型配置后再重试。',
     });
   }
 
@@ -92,14 +233,7 @@ export async function callModel(
 
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
-      const shortBody = bodyText.slice(0, 300);
-      return failure({
-        code: 'MODEL_HTTP_ERROR',
-        modelName: config.modelName,
-        statusCode: response.status,
-        retryable: response.status >= 500 || response.status === 429,
-        message: `Model HTTP ${response.status}${shortBody ? `: ${shortBody}` : ''}`,
-      });
+      return mapHttpFailure(response.status, config.modelName, bodyText, retryCount);
     }
 
     const jsonBody: unknown = await response.json().catch(() => null);
@@ -108,10 +242,12 @@ export async function callModel(
 
     if (typeof content !== 'string' || content.trim().length === 0) {
       return failure({
-        code: 'MODEL_RESPONSE_INVALID',
+        code: 'MODEL_RESPONSE_PARSE_ERROR',
         modelName: config.modelName,
         retryable: false,
-        message: 'Model response missing choices[0].message.content',
+        retryCount,
+        message: '模型响应解析失败：缺少 choices[0].message.content',
+        nextAction: '请检查模型返回格式是否兼容 OpenAI Chat Completions。',
       });
     }
 
@@ -121,16 +257,34 @@ export async function callModel(
       modelName: config.modelName,
       text: content.trim(),
       usage: mapUsage(parsed?.usage),
+      retryCount,
     };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return failure({
-      code: 'MODEL_NETWORK_ERROR',
-      modelName: config.modelName,
-      retryable: true,
-      message: `Model request failed: ${message}`,
-    });
+  } catch (error) {
+    return mapNetworkFailure(error, config.modelName, retryCount);
   } finally {
     clearTimeout(timeoutHandle);
   }
+}
+
+export async function callModel(
+  input: ModelCallInput,
+  configState: ModelConfigState = loadModelConfig(),
+): Promise<ModelCallResult> {
+  const firstAttempt = await callModelOnce(input, configState, 0);
+  if (firstAttempt.ok || !firstAttempt.retryable) {
+    return firstAttempt;
+  }
+
+  await delay(RETRY_DELAY_MS);
+  const secondAttempt = await callModelOnce(input, configState, 1);
+  if (secondAttempt.ok) {
+    return secondAttempt;
+  }
+
+  return failure({
+    ...secondAttempt,
+    retryable: secondAttempt.retryable,
+    retryCount: 1,
+    message: secondAttempt.message,
+  });
 }

@@ -507,6 +507,7 @@ export class QueryRuntime {
           provider: response.provider,
           model: response.modelName,
           usedMockFallback: false,
+          retryCount: response.retryCount,
           contextStrategy: context.contextStrategy,
           usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
           usedSkillIds: context.usedSkills.map((item) => item.id),
@@ -528,6 +529,9 @@ export class QueryRuntime {
         provider: 'openai_compatible',
         model: modelConfigState.config?.modelName ?? 'unknown-model',
         usedMockFallback: false,
+        retryCount: response.retryCount,
+        lastFailureCode: response.code,
+        lastFailureMessage: response.message,
         contextStrategy: context.contextStrategy,
         usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
         usedSkillIds: context.usedSkills.map((item) => item.id),
@@ -572,6 +576,9 @@ export class QueryRuntime {
         model: 'mock-fallback-v1',
         usedMockFallback: true,
         fallbackReason: failure.message,
+        retryCount: failure.retryCount,
+        lastFailureCode: failure.code,
+        lastFailureMessage: failure.message,
         contextStrategy,
         usedKnowledgeIds: context.usedKnowledge.map((item) => item.id),
         usedSkillIds: context.usedSkills.map((item) => item.id),
@@ -583,18 +590,23 @@ export class QueryRuntime {
 
   private mapModelFailureToExecutionError(failure: ModelCallFailure): ExecutionError {
     switch (failure.code) {
-      case 'MODEL_HTTP_ERROR':
+      case 'MODEL_TIMEOUT':
+      case 'MODEL_CONNECT_ERROR':
+      case 'MODEL_HTTP_401':
+      case 'MODEL_HTTP_403':
+      case 'MODEL_HTTP_429':
+      case 'MODEL_HTTP_5XX':
       case 'MODEL_NETWORK_ERROR':
         return {
           code: failure.code,
-          message: failure.message,
+          message: `${failure.message}\n${failure.retryCount > 0 ? '已自动重试 1 次。' : '未执行自动重试。'}\n建议：${failure.nextAction}`,
           category: 'model_http_error',
           retryable: failure.retryable,
         };
-      case 'MODEL_RESPONSE_INVALID':
+      case 'MODEL_RESPONSE_PARSE_ERROR':
         return {
           code: failure.code,
-          message: failure.message,
+          message: `${failure.message}\n未执行自动重试。\n建议：${failure.nextAction}`,
           category: 'model_response_error',
           retryable: false,
         };
@@ -603,7 +615,7 @@ export class QueryRuntime {
       default:
         return {
           code: failure.code,
-          message: failure.message,
+          message: `${failure.message}\n未执行自动重试。\n建议：${failure.nextAction}`,
           category: 'model_config_error',
           retryable: false,
         };
@@ -711,6 +723,9 @@ export class QueryRuntime {
         errorCategory: result.error?.category,
         details: {
           fallbackUsed: result.metrics.fallbackUsed ?? false,
+          modelRetryCount: modelTrace?.retryCount ?? 0,
+          modelLastFailureCode: modelTrace?.lastFailureCode,
+          modelLastFailureMessage: modelTrace?.lastFailureMessage,
           modelCallMs: result.metrics.modelCallMs,
           wallTimeMs: result.metrics.wallTimeMs,
           toolExecutionMs: result.metrics.toolExecutionMs,
